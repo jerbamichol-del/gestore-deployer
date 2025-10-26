@@ -1,0 +1,95 @@
+name: Build and push to gestore/gh-pages
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *" # ogni 10 minuti cerca aggiornamenti
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) Prende il codice dalla tua repo "gestore"
+      - name: Checkout gestore (source)
+        uses: actions/checkout@v4
+        with:
+          repository: jerbamichol-del/gestore
+          ref: main
+          path: source
+
+      # 2) Installa Node e dipendenze
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        working-directory: source
+        run: npm install
+
+      # 3) Patch anti-typo di AI Studio (React)
+      - name: Patch AI Studio typos
+        working-directory: source
+        run: |
+          grep -RIl "import React, 'react';" . | xargs -r sed -i "s/import React, 'react';/import React from 'react';/g"
+          grep -RIl "import React, from 'react';" . | xargs -r sed -i "s/import React, from 'react';/import React from 'react';/g"
+
+      # 4) Build Vite con base /gestore/ e process.env.API_KEY
+      - name: Build (Vite for Pages)
+        working-directory: source
+        env:
+          VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
+        run: |
+          cat > vite.pages.config.mjs << 'EOF'
+          import react from '@vitejs/plugin-react'
+          import { defineConfig } from 'vite'
+          export default defineConfig({
+            base: '/gestore/',
+            plugins: [react()],
+            build: { outDir: 'dist' },
+            define: { 'process.env.API_KEY': JSON.stringify(process.env.VITE_GEMINI_API_KEY || '') },
+          })
+          EOF
+          npx vite build -c vite.pages.config.mjs
+
+      # 5) Copia manifest/SW/icone e patch per /gestore/ + SPA fallback
+      - name: Patch PWA assets
+        working-directory: source
+        run: |
+          mkdir -p dist
+          [ -f manifest.json ] && cp -v manifest.json dist/ || true
+          [ -f service-worker.js ] && cp -v service-worker.js dist/ || true
+          for f in icon-192.svg icon-512.svg; do [ -f "$f" ] && cp -v "$f" dist/ || true; done
+          [ -d icons ] && cp -rv icons dist/ || true
+
+          node -e "
+          const fs=require('fs'); const p='dist/manifest.json';
+          if (!fs.existsSync(p)) process.exit(0);
+          const m=JSON.parse(fs.readFileSync(p,'utf8'));
+          m.id='/gestore/'; m.start_url='/gestore/'; m.scope='/gestore/';
+          if (Array.isArray(m.icons)) {
+            m.icons=m.icons.map(ic=>{ if(ic?.src){ if(!ic.src.startsWith('/gestore/')){ const clean=ic.src.replace(/^\\.?\\/*/,''); ic.src='/gestore/'+clean.replace(/^\\//,''); } } return ic; });
+          }
+          if (m.share_target?.action){ const a=m.share_target.action; m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/'+a.replace(/^\\/+/, ''); }
+          fs.writeFileSync(p, JSON.stringify(m,null,2));
+          "
+
+          RUN=${{ github.run_number }}
+          sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${RUN}\" />#" dist/index.html || true
+          sed -i -E "s#serviceWorker\\.register\\([^)]*\\)#serviceWorker.register('/gestore/service-worker.js?v=${RUN}', { scope: '/gestore/' })#" dist/index.html || true
+
+          cp -v dist/index.html dist/404.html
+
+      # 6) Pubblica i file buildati su gh-pages della repo "gestore"
+      - name: Push to gestore/gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          personal_token: ${{ secrets.GH_PAT }}
+          external_repository: jerbamichol-del/gestore
+          publish_branch: gh-pages
+          publish_dir: source/dist
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
