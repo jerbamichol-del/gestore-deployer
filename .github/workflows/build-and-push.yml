@@ -89,21 +89,20 @@ jobs:
         run: |
           mkdir -p dist
 
-     # Rimuovi QUALSIASI auto-skipWaiting nel SW buildato
-if [ -f dist/service-worker.js ]; then
-  # 1) .then(()=>self.skipWaiting()) con o senza spazi
-  sed -i -E "s/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g" dist/service-worker.js || true
-  sed -i -E "s/\.then\(\(\)\)=>self\.skipWaiting\(\)\)//g" dist/service-worker.js || true
+          # Rimuovi QUALSIASI auto-skipWaiting nel SW buildato
+          if [ -f dist/service-worker.js ]; then
+            # 1) .then(()=>self.skipWaiting()) con o senza spazi
+            sed -i -E "s/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g" dist/service-worker.js || true
+            sed -i -E "s/\.then\(\(\)\)=>self\.skipWaiting\(\)\)//g" dist/service-worker.js || true
 
-  # 2) self.skipWaiting() “sciolto”, con o senza spazi/; finale
-  sed -i -E "s/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g" dist/service-worker.js || true
+            # 2) self.skipWaiting() “sciolto”, con o senza spazi/; finale
+            sed -i -E "s/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g" dist/service-worker.js || true
 
-  # 3) Se manca l’handler per l’update su richiesta, aggiungilo
-  if ! grep -q "SKIP_WAITING" dist/service-worker.js; then
-    echo "self.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });" >> dist/service-worker.js
-  fi
-fi
-
+            # 3) Se manca l’handler per l’update su richiesta, aggiungilo
+            if ! grep -q "SKIP_WAITING" dist/service-worker.js; then
+              echo "self.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });" >> dist/service-worker.js
+            fi
+          fi
 
           # Crea pwa-update.js con Node (niente heredoc)
           node -e "require('fs').writeFileSync('dist/pwa-update.js', [
