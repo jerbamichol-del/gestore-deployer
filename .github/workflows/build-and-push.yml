@@ -61,7 +61,7 @@ jobs:
         run: |
           mkdir -p dist
           [ -f manifest.json ] && cp -v manifest.json dist/ || true
-          [ -f service-worker.js ] && cp -v service-worker.js dist/ || true
+          # Copiamo anche (eventuale) cartella icons se presente
           for f in icon-192.svg icon-512.svg; do [ -f "$f" ] && cp -v "$f" dist/ || true; done
           [ -d icons ] && cp -rv icons dist/ || true
 
@@ -78,91 +78,88 @@ jobs:
           "
 
           RUN=${{ github.run_number }}
+          # Aggiorna link manifest + SW nell'index della build (se presenti)
           sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${RUN}\" />#" dist/index.html || true
           sed -i -E "s#serviceWorker\\.register\\([^)]*\\)#serviceWorker.register('/gestore/service-worker.js?v=${RUN}', { scope: '/gestore/' })#" dist/index.html || true
 
+          # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html
 
       # 5.1) ✅ Banner update e SW controllato (senza toccare i sorgenti)
       - name: Ensure PWA update prompt & controlled SW
         working-directory: source
+        shell: bash
         run: |
+          set -e
           mkdir -p dist
 
-          # Rimuovi QUALSIASI auto-skipWaiting nel SW buildato
-          if [ -f dist/service-worker.js ]; then
-            # 1) .then(()=>self.skipWaiting()) con o senza spazi
-            sed -i -E "s/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g" dist/service-worker.js || true
-            sed -i -E "s/\.then\(\(\)\)=>self\.skipWaiting\(\)\)//g" dist/service-worker.js || true
-
-            # 2) self.skipWaiting() “sciolto”, con o senza spazi/; finale
-            sed -i -E "s/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g" dist/service-worker.js || true
-
-            # 3) Se manca l’handler per l’update su richiesta, aggiungilo
-            if ! grep -q "SKIP_WAITING" dist/service-worker.js; then
-              echo "self.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });" >> dist/service-worker.js
-            fi
-          fi
-          # 1) Se non esiste dist/service-worker.js, prova a copiarlo dalla root
-          if [ ! -f dist/service-worker.js ]; then
-            echo "// placeholder SW (verrà sostituito alla prossima release)" > dist/service-worker.js
+          # Usa SEMPRE il SW pulito dal sorgente (se c'è)
+          if [ -f service-worker.js ]; then
+            cp -fv service-worker.js dist/service-worker.js
+          elif [ ! -f dist/service-worker.js ]; then
+            echo "// placeholder SW" > dist/service-worker.js
           fi
 
-          # 3) Togli QUALSIASI auto-skipWaiting (tutti i formati comuni)
+          # Rimuovi QUALSIASI skipWaiting automatico
           sed -i -E "s/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g" dist/service-worker.js || true
           sed -i -E "s/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g" dist/service-worker.js || true
 
-          # 4) Rimuovi eventuali vecchi listener 'message' duplicati e aggiungi quello giusto
-          sed -i -E "/addEventListener\(['\"]message['\"]/,+3d" dist/service-worker.js || true
-          printf "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n" >> dist/service-worker.js
+          # Assicura il listener per update on-demand una sola volta
+          node - <<'JS'
+          const fs = require('fs');
+          const p = 'dist/service-worker.js';
+          let s = fs.readFileSync(p, 'utf8');
+          if (!/SKIP_WAITING/.test(s)) {
+            s += "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n";
+            fs.writeFileSync(p, s);
+          }
+          console.log('SW ok, length:', s.length);
+          JS
 
-          # 5) Stampa a log (debug) per verificare che sia davvero lì
-          echo '--- FINAL service-worker.js (tail) ---'
-          tail -n 40 dist/service-worker.js
-            
-          # Crea pwa-update.js con Node (niente heredoc)
-          node -e "require('fs').writeFileSync('dist/pwa-update.js', [
-          '(function(){',
-          '  if(!(\\'serviceWorker\\' in navigator)) return;',
-          '  var scopeGuess=\\'/gestore/\\';',
-          '  function banner(onAccept,onDismiss){',
-          '    var w=document.createElement(\\'div\\');',
-          '    w.id=\\'pwa-update-banner\\';',
-          '    w.className=\\'fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border border-slate-200 bg-white shadow-xl p-4 flex items-start gap-3\\';',
-          '    w.innerHTML=\\'<div class=\"flex-1\"><h3 class=\"text-slate-900 font-semibold\">Aggiornamento disponibile</h3><p class=\"text-slate-600 text-sm mt-1\">È pronta una nuova versione dell\\'app.</p></div><div class=\"flex gap-2\"><button id=\"pwa-update-later\" class=\"px-3 py-2 text-sm rounded-lg bg-slate-200 text-slate-800\">Più tardi</button><button id=\"pwa-update-now\" class=\"px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white\">Aggiorna</button></div>\\';',
-          '    document.body.appendChild(w);',
-          '    document.getElementById(\\'pwa-update-later\\').onclick=function(){ w.remove(); onDismiss&&onDismiss(); };',
-          '    document.getElementById(\\'pwa-update-now\\').onclick=function(){ w.remove(); onAccept&&onAccept(); };',
-          '  }',
-          '  var refreshing=false;',
-          '  navigator.serviceWorker.addEventListener(\\'controllerchange\\', function(){ if(refreshing) return; refreshing=true; location.reload(); });',
-          '  function wire(reg){',
-          '    function show(){ if(reg.waiting && navigator.serviceWorker.controller){ banner(function(){ reg.waiting && reg.waiting.postMessage({type:\\'SKIP_WAITING\\'}); }, function(){}); } }',
-          '    show();',
-          '    reg.addEventListener(\\'updatefound\\', function(){',
-          '      var nw=reg.installing;',
-          '      nw && nw.addEventListener(\\'statechange\\', function(){',
-          '        if(nw.state===\\'installed\\' && navigator.serviceWorker.controller){ show(); }',
-          '      });',
-          '    });',
-          '    var check=function(){ reg.update().catch(function(){}); };',
-          '    window.addEventListener(\\'focus\\', check); check();',
-          '  }',
-          '  window.addEventListener(\\'load\\', function(){',
-          '    (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) ).then(function(reg){',
-          '      if(!reg){ return navigator.serviceWorker.getRegistration(); }',
-          '      return reg;',
-          '    }).then(function(reg){ reg && wire(reg); }).catch(function(){});',
-          '  });',
-          '})();'
-          ].join('\\n'))"
+          # Crea pwa-update.js
+          node - <<'JS'
+          const fs = require('fs');
+          const code = `(function(){ if(!('serviceWorker' in navigator)) return;
+            var scopeGuess='/gestore/';
+            function banner(onAccept,onDismiss){
+              var w=document.createElement('div');
+              w.id='pwa-update-banner';
+              w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border border-slate-200 bg-white shadow-xl p-4 flex items-start gap-3';
+              w.innerHTML='<div class="flex-1"><h3 class="text-slate-900 font-semibold">Aggiornamento disponibile</h3><p class="text-slate-600 text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-200 text-slate-800">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
+              document.body.appendChild(w);
+              document.getElementById('pwa-update-later').onclick=function(){ w.remove(); onDismiss&&onDismiss(); };
+              document.getElementById('pwa-update-now').onclick=function(){ w.remove(); onAccept&&onAccept(); };
+            }
+            var refreshing=false;
+            navigator.serviceWorker.addEventListener('controllerchange', function(){ if(refreshing) return; refreshing=true; location.reload(); });
+            function wire(reg){
+              function show(){ if(reg.waiting && navigator.serviceWorker.controller){ banner(function(){ reg.waiting && reg.waiting.postMessage({type:'SKIP_WAITING'}); }, function(){}); } }
+              show();
+              reg.addEventListener('updatefound', function(){
+                var nw=reg.installing;
+                nw && nw.addEventListener('statechange', function(){
+                  if(nw.state==='installed' && navigator.serviceWorker.controller){ show(); }
+                });
+              });
+              var check=function(){ reg.update().catch(function(){}); };
+              window.addEventListener('focus', check); check();
+            }
+            window.addEventListener('load', function(){
+              (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) ).then(function(reg){
+                if(!reg){ return navigator.serviceWorker.getRegistration(); }
+                return reg;
+              }).then(function(reg){ reg && wire(reg); }).catch(function(){});
+            }); })();`;
+          fs.writeFileSync('dist/pwa-update.js', code);
+          JS
 
-          # Inietta lo script in index.html se non presente
-          if [ -f dist/index.html ]; then
-            if ! grep -q "pwa-update.js" dist/index.html; then
-              sed -i 's#</body>#  <script type="module" src="./pwa-update.js"></script>\n</body>#' dist/index.html
-            fi
+          # Inietta pwa-update.js nell'index se non presente
+          if [ -f dist/index.html ] && ! grep -q "pwa-update.js" dist/index.html; then
+            sed -i 's#</body>#  <script type="module" src="./pwa-update.js"></script>\n</body>#' dist/index.html
           fi
+
+          echo '--- SW (tail) ---'
+          tail -n 30 dist/service-worker.js
 
       # 6) Pubblica i file buildati su gh-pages della repo "gestore"
       - name: Push to gestore/gh-pages
