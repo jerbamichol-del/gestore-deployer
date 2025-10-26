@@ -92,6 +92,7 @@ jobs:
           # Rimuovi auto-skipWaiting nel SW buildato
           if [ -f dist/service-worker.js ]; then
             sed -i "s/\.then(() => self\.skipWaiting())//" dist/service-worker.js || true
+            sed -i "s/self\.skipWaiting();//g" dist/service-worker.js || true
             # Se manca l'handler, aggiungilo in una riga
             if ! grep -q "SKIP_WAITING" dist/service-worker.js; then
               echo "self.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });" >> dist/service-worker.js
