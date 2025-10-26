@@ -103,7 +103,23 @@ jobs:
               echo "self.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });" >> dist/service-worker.js
             fi
           fi
+          # 1) Se non esiste dist/service-worker.js, prova a copiarlo dalla root
+          if [ ! -f dist/service-worker.js ]; then
+            echo "// placeholder SW (verrà sostituito alla prossima release)" > dist/service-worker.js
+          fi
 
+          # 3) Togli QUALSIASI auto-skipWaiting (tutti i formati comuni)
+          sed -i -E "s/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g" dist/service-worker.js || true
+          sed -i -E "s/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g" dist/service-worker.js || true
+
+          # 4) Rimuovi eventuali vecchi listener 'message' duplicati e aggiungi quello giusto
+          sed -i -E "/addEventListener\(['\"]message['\"]/,+3d" dist/service-worker.js || true
+          printf "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n" >> dist/service-worker.js
+
+          # 5) Stampa a log (debug) per verificare che sia davvero lì
+          echo '--- FINAL service-worker.js (tail) ---'
+          tail -n 40 dist/service-worker.js
+            
           # Crea pwa-update.js con Node (niente heredoc)
           node -e "require('fs').writeFileSync('dist/pwa-update.js', [
           '(function(){',
