@@ -83,23 +83,18 @@ jobs:
 
           cp -v dist/index.html dist/404.html
 
-      # 5.1) ✅ Aggiunge banner update e SW controllato (nessun cambiamento al tuo codice sorgente)
+      # 5.1) ✅ Banner update e SW controllato (senza toccare i sorgenti)
       - name: Ensure PWA update prompt & controlled SW
         working-directory: source
         run: |
           mkdir -p dist
 
-          # Rimuovi auto-skipWaiting nel SW buildato e aggiungi handler su richiesta
+          # Rimuovi auto-skipWaiting nel SW buildato
           if [ -f dist/service-worker.js ]; then
             sed -i "s/\.then(() => self\.skipWaiting())//" dist/service-worker.js || true
-            if ! grep -q "addEventListener('message'" dist/service-worker.js; then
-              cat >> dist/service-worker.js <<'EOF'
-self.addEventListener('message', (event) => {
-  if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) {
-    self.skipWaiting();
-  }
-});
-EOF
+            # Se manca l'handler, aggiungilo in una riga (niente heredoc = niente errori YAML)
+            if ! grep -q "SKIP_WAITING" dist/service-worker.js; then
+              echo "self.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });" >> dist/service-worker.js
             fi
           fi
 
