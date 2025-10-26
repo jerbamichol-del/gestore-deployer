@@ -55,13 +55,13 @@ jobs:
           EOF
           npx vite build -c vite.pages.config.mjs
 
-      # 5) Copia manifest/SW/icone e patch per /gestore/ + SPA fallback
+      # 5) Copia manifest/icone e patch per /gestore/ + SPA fallback
       - name: Patch PWA assets
         working-directory: source
         run: |
           mkdir -p dist
           [ -f manifest.json ] && cp -v manifest.json dist/ || true
-          # Copiamo anche (eventuale) cartella icons se presente
+          # (service-worker.js lo gestiamo nello step successivo)
           for f in icon-192.svg icon-512.svg; do [ -f "$f" ] && cp -v "$f" dist/ || true; done
           [ -d icons ] && cp -rv icons dist/ || true
 
@@ -93,7 +93,7 @@ jobs:
           set -e
           mkdir -p dist
 
-          # Usa SEMPRE il SW pulito dal sorgente (se c'è)
+          # Usa SEMPRE il SW pulito dal sorgente (se c'è), altrimenti placeholder
           if [ -f service-worker.js ]; then
             cp -fv service-worker.js dist/service-worker.js
           elif [ ! -f dist/service-worker.js ]; then
@@ -109,14 +109,15 @@ jobs:
           const fs = require('fs');
           const p = 'dist/service-worker.js';
           let s = fs.readFileSync(p, 'utf8');
-          if (!/SKIP_WAITING/.test(s)) {
-            s += "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n";
-            fs.writeFileSync(p, s);
-          }
+          // rimuovi vecchi listener 'message'
+          s = s.replace(/self\.addEventListener\(\s*['"]message['"][\s\S]*?\}\s*\)\s*;\s*/g, '');
+          // apponi quello corretto
+          s += "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n";
+          fs.writeFileSync(p, s);
           console.log('SW ok, length:', s.length);
           JS
 
-          # Crea pwa-update.js
+          # Crea pwa-update.js (banner “Aggiornamento disponibile”)
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){ if(!('serviceWorker' in navigator)) return;
