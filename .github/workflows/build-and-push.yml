@@ -244,7 +244,7 @@ jobs:
         working-directory: source
         shell: bash
         env:
-          RESET_ENDPOINT: "https://script.google.com/macros/s/AKfycbyE3eTfSyJpRHX1hlmO8vv6H55SvovcH4kwEXAOjWez1tkYrzOwhNCGeucddAQfj_XUTw/exec"
+          RESET_ENDPOINT: "https://script.google.com/macros/s/AKfycbzmq-PTrMcMdrYqCRX29_S034zCaj5ttyc3tZhdhjV77wF6n99LKricFgzy7taGqKOo/exec"
         run: |
           set -e
           node - <<'JS'
