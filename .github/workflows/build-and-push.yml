@@ -58,7 +58,6 @@ jobs:
       # 5) Copia manifest/icone e patch per /gestore/ + SPA fallback
       - name: Patch PWA assets
         working-directory: source
-        shell: bash
         run: |
           set -e
           mkdir -p dist
@@ -73,18 +72,17 @@ jobs:
           const m=JSON.parse(fs.readFileSync(p,'utf8'));
           m.id='/gestore/'; m.start_url='/gestore/'; m.scope='/gestore/';
           if (Array.isArray(m.icons)) {
-            m.icons = m.icons.map(ic => {
-              if (ic?.src) {
-                // rimuove uno o più './' o '/' iniziali
-                const clean = ic.src.replace(/^(\.?\/)+/, '');
-                ic.src = '/gestore/' + clean.replace(/^\/+/, '');
+            m.icons=m.icons.map(ic=>{
+              if(ic && ic.src){
+                const clean = ic.src.replace(/^(\\.?\\/)+/,'').replace(/^\\//,'');
+                ic.src = '/gestore/' + clean;
               }
               return ic;
             });
           }
-          if (m.share_target?.action){
-            const a = m.share_target.action || '';
-            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\/+/, '');
+          if (m.share_target && m.share_target.action){
+            const a = m.share_target.action;
+            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\\/+/, '');
           }
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
@@ -104,6 +102,7 @@ jobs:
         run: |
           set -e
           mkdir -p dist
+          RUN=${{ github.run_number }}
 
           # Usa SEMPRE il SW pulito dal sorgente se presente; altrimenti placeholder
           if [ -f service-worker.js ]; then
@@ -131,16 +130,17 @@ jobs:
           console.log('SW ok, length:', s.length);
           JS
 
-          # Genera pwa-update.js (banner su load, focus/visibility e ogni 15m, reload solo su accettazione)
+          # Genera pwa-update.js (versionato col RUN per evitare cache stantia)
           node - <<'JS'
           const fs = require('fs');
+          const run = process.env.RUN_NUMBER || '';
           const code = `(function(){
             if(!('serviceWorker' in navigator)) return;
 
             var scopeGuess = '/gestore/';
             var FLAG = 'pwa-skip-waiting';
             var PERIOD_MS = 15 * 60 * 1000; // 15 minuti
-            var FIRST_START_DELAY = 2000;    // 2s dopo l'apertura
+            var FIRST_START_DELAY = 2000;    // 2s dopo l'avvio
 
             function banner(onAccept,onDismiss){
               var w=document.createElement('div');
@@ -201,20 +201,19 @@ jobs:
           fs.writeFileSync('dist/pwa-update.js', code);
           JS
 
-          # Inietta/aggiorna pwa-update.js con querystring di versione
-          RUN=${{ github.run_number }}
+          # Inietta pwa-update.js versionato nell'index (cache-busting)
           if [ -f dist/index.html ]; then
-            if ! grep -q "pwa-update.js" dist/index.html; then
-              sed -i "s#</body>#  <script type=\"module\" src=\"./pwa-update.js?v=${RUN}\"></script>\n</body>#" dist/index.html
-            else
+            if grep -q "pwa-update.js" dist/index.html; then
               sed -i -E "s#pwa-update\.js(\?v=[0-9]+)?#pwa-update.js?v=${RUN}#g" dist/index.html
+            else
+              sed -i "s#</body>#  <script type=\"module\" src=\"./pwa-update.js?v=${RUN}\"></script>\n</body>#" dist/index.html
             fi
           fi
 
           echo '--- SW (tail) ---'
           tail -n 30 dist/service-worker.js
-          echo '--- pwa-update.js (head) ---'
-          head -n 20 dist/pwa-update.js
+          echo '--- pwa-update.js injected version ---'
+          grep -o "pwa-update.js?v=${RUN}" -n dist/index.html || true
 
       # 6) Pubblica i file buildati su gh-pages della repo "gestore"
       - name: Push to gestore/gh-pages
