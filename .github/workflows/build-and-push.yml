@@ -58,6 +58,7 @@ jobs:
       # 5) Copia manifest/icone e patch per /gestore/ + SPA fallback
       - name: Patch PWA assets
         working-directory: source
+        shell: bash
         run: |
           set -e
           mkdir -p dist
@@ -95,7 +96,7 @@ jobs:
           # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) ✅ Banner update e SW controllato (on load + focus + periodic)
+      # 5.1) ✅ Banner update + fallback versione (on load + focus + periodic)
       - name: Ensure PWA update prompt & controlled SW
         working-directory: source
         shell: bash
@@ -130,10 +131,12 @@ jobs:
           console.log('SW ok, length:', s.length);
           JS
 
-          # Genera pwa-update.js (versionato col RUN per evitare cache stantia)
+          # --- Fallback a versione: crea version.json (così mostriamo il banner anche senza waiting)
+          node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ run: ${RUN}, builtAt: new Date().toISOString() }, null, 2))"
+
+          # Genera pwa-update.js (mostra banner se c'è waiting O se version.json indica build nuova)
           node - <<'JS'
           const fs = require('fs');
-          const run = process.env.RUN_NUMBER || '';
           const code = `(function(){
             if(!('serviceWorker' in navigator)) return;
 
@@ -141,8 +144,11 @@ jobs:
             var FLAG = 'pwa-skip-waiting';
             var PERIOD_MS = 15 * 60 * 1000; // 15 minuti
             var FIRST_START_DELAY = 2000;    // 2s dopo l'avvio
+            var VERSION_URL = scopeGuess + 'version.json?ts=' + Date.now();
+            var LAST_SEEN_KEY = 'pwa-last-version-run';
 
             function banner(onAccept,onDismiss){
+              if (document.getElementById('pwa-update-banner')) return;
               var w=document.createElement('div');
               w.id='pwa-update-banner';
               w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border border-slate-200 bg-white shadow-xl p-4 flex items-start gap-3';
@@ -156,6 +162,7 @@ jobs:
               };
             }
 
+            // Ricarica SOLO se l'utente ha accettato
             navigator.serviceWorker.addEventListener('controllerchange', function(){
               try {
                 if (sessionStorage.getItem(FLAG) === '1') {
@@ -166,22 +173,39 @@ jobs:
             });
 
             function wire(reg){
-              function maybeShow(){
+              // Percorso standard: mostra banner se c'è un SW in waiting
+              function showIfWaiting(){
                 if(reg.waiting && navigator.serviceWorker.controller){
                   banner(function(){ reg.waiting && reg.waiting.postMessage({type:'SKIP_WAITING'}); }, function(){});
                 }
               }
-
-              maybeShow();
-
+              showIfWaiting();
               reg.addEventListener('updatefound', function(){
                 var nw = reg.installing;
                 nw && nw.addEventListener('statechange', function(){
-                  if(nw.state==='installed' && navigator.serviceWorker.controller){ maybeShow(); }
+                  if(nw.state==='installed' && navigator.serviceWorker.controller){ showIfWaiting(); }
                 });
               });
 
-              var check = function(){ reg.update().catch(function(){}); };
+              // Fallback a versione: se build nuova ma niente waiting → proponi reload gentile
+              function checkVersion(){
+                fetch(VERSION_URL, { cache: 'no-store' })
+                  .then(r=>r.json())
+                  .then(v=>{
+                    var last = 0; try { last = parseInt(localStorage.getItem(LAST_SEEN_KEY)||'0',10); } catch(e){}
+                    var cur = parseInt(v && v.run || 0,10);
+                    if (cur && cur > last) {
+                      if (!reg.waiting) {
+                        banner(function(){
+                          try { localStorage.setItem(LAST_SEEN_KEY, String(cur)); } catch(e){}
+                          location.reload();
+                        }, function(){});
+                      }
+                    }
+                  }).catch(function(){});
+              }
+
+              var check = function(){ reg.update().catch(function(){}); checkVersion(); };
 
               setTimeout(check, FIRST_START_DELAY);
               window.addEventListener('focus', check);
@@ -201,7 +225,7 @@ jobs:
           fs.writeFileSync('dist/pwa-update.js', code);
           JS
 
-          # Inietta pwa-update.js versionato nell'index (cache-busting)
+          # Inietta pwa-update.js con cache-busting RUN
           if [ -f dist/index.html ]; then
             if grep -q "pwa-update.js" dist/index.html; then
               sed -i -E "s#pwa-update\.js(\?v=[0-9]+)?#pwa-update.js?v=${RUN}#g" dist/index.html
@@ -212,8 +236,8 @@ jobs:
 
           echo '--- SW (tail) ---'
           tail -n 30 dist/service-worker.js
-          echo '--- pwa-update.js injected version ---'
-          grep -o "pwa-update.js?v=${RUN}" -n dist/index.html || true
+          echo '--- version.json ---'
+          cat dist/version.json || true
 
       # 6) Pubblica i file buildati su gh-pages della repo "gestore"
       - name: Push to gestore/gh-pages
