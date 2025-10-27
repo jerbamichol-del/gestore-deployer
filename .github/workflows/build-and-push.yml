@@ -58,7 +58,9 @@ jobs:
       # 5) Copia manifest/icone e patch per /gestore/ + SPA fallback
       - name: Patch PWA assets
         working-directory: source
+        shell: bash
         run: |
+          set -e
           mkdir -p dist
           [ -f manifest.json ] && cp -v manifest.json dist/ || true
           # (service-worker.js lo gestiamo nello step successivo)
@@ -71,9 +73,19 @@ jobs:
           const m=JSON.parse(fs.readFileSync(p,'utf8'));
           m.id='/gestore/'; m.start_url='/gestore/'; m.scope='/gestore/';
           if (Array.isArray(m.icons)) {
-            m.icons=m.icons.map(ic=>{ if(ic?.src){ if(!ic.src.startsWith('/gestore/')){ const clean=ic.src.replace(/^\.\?\/+*/,''); ic.src='/gestore/'+clean.replace(/^\//,''); } } return ic; });
+            m.icons = m.icons.map(ic => {
+              if (ic?.src) {
+                // rimuove uno o più './' o '/' iniziali
+                const clean = ic.src.replace(/^(\.?\/)+/, '');
+                ic.src = '/gestore/' + clean.replace(/^\/+/, '');
+              }
+              return ic;
+            });
           }
-          if (m.share_target?.action){ const a=m.share_target.action; m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/'+a.replace(/^\/+/, ''); }
+          if (m.share_target?.action){
+            const a = m.share_target.action || '';
+            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\/+/, '');
+          }
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
 
@@ -83,7 +95,7 @@ jobs:
           sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${RUN}', { scope: '/gestore/' })#" dist/index.html || true
 
           # SPA fallback per GitHub Pages
-          cp -v dist/index.html dist/404.html
+          cp -v dist/index.html dist/404.html || true
 
       # 5.1) ✅ Banner update e SW controllato (on load + focus + periodic)
       - name: Ensure PWA update prompt & controlled SW
@@ -119,7 +131,7 @@ jobs:
           console.log('SW ok, length:', s.length);
           JS
 
-          # Genera pwa-update.js (banner su load, focus/visibility e ogni 15m, con reload SOLO se accettato)
+          # Genera pwa-update.js (banner su load, focus/visibility e ogni 15m, reload solo su accettazione)
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -189,9 +201,14 @@ jobs:
           fs.writeFileSync('dist/pwa-update.js', code);
           JS
 
-          # Inietta pwa-update.js nell'index se non presente
-          if [ -f dist/index.html ] && ! grep -q "pwa-update.js" dist/index.html; then
-            sed -i 's#</body>#  <script type="module" src="./pwa-update.js"></script>\n</body>#' dist/index.html
+          # Inietta/aggiorna pwa-update.js con querystring di versione
+          RUN=${{ github.run_number }}
+          if [ -f dist/index.html ]; then
+            if ! grep -q "pwa-update.js" dist/index.html; then
+              sed -i "s#</body>#  <script type=\"module\" src=\"./pwa-update.js?v=${RUN}\"></script>\n</body>#" dist/index.html
+            else
+              sed -i -E "s#pwa-update\.js(\?v=[0-9]+)?#pwa-update.js?v=${RUN}#g" dist/index.html
+            fi
           fi
 
           echo '--- SW (tail) ---'
