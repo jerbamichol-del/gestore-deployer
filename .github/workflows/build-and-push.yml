@@ -3,7 +3,7 @@ name: Build and push to gestore/gh-pages
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *" # ogni 10 minuti cerca aggiornamenti
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: write
@@ -12,21 +12,19 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     steps:
-      # 1) Prende il codice dalla tua repo "gestore"
       - name: Checkout gestore (source)
         uses: actions/checkout@v4
         with:
           repository: jerbamichol-del/gestore
           ref: main
           path: source
+          token: ${{ secrets.GH_PAT }}
 
-      # 1.1) SHA commit sorgente (per versioning stabile del banner)
       - name: Read source commit SHA
         id: srcsha
         working-directory: source
         run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      # 2) Node + deps
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -36,14 +34,12 @@ jobs:
         working-directory: source
         run: npm install
 
-      # 3) Patch anti-typo di AI Studio (React)
       - name: Patch AI Studio typos
         working-directory: source
         run: |
           grep -RIl "import React, 'react';" . | xargs -r sed -i "s/import React, 'react';/import React from 'react';/g"
           grep -RIl "import React, from 'react';" . | xargs -r sed -i "s/import React, from 'react';/import React from 'react';/g"
 
-      # 4) Build Vite con base /gestore/
       - name: Build (Vite for Pages)
         working-directory: source
         env:
@@ -61,7 +57,6 @@ jobs:
           EOF
           npx vite build -c vite.pages.config.mjs
 
-      # 5) Copia manifest/icone (+ reset/ se presente) e patch per /gestore/ + SPA fallback
       - name: Patch PWA assets
         working-directory: source
         shell: bash
@@ -96,14 +91,10 @@ jobs:
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
 
-          # Patch riferimenti con hash commit stabile
           sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${BUILD_TAG}\" />#" dist/index.html || true
           sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${BUILD_TAG}', { scope: '/gestore/' })#" dist/index.html || true
-
-          # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) Banner update (no spam) + version.json (commit) + Email reset shim
       - name: Ensure PWA update prompt & controlled SW
         working-directory: source
         shell: bash
@@ -114,7 +105,6 @@ jobs:
           set -e
           mkdir -p dist
 
-          # 1) Service Worker: copia, pulizia skipWaiting, listener message unico
           if [ -f service-worker.js ]; then
             cp -fv service-worker.js dist/service-worker.js
           elif [ ! -f dist/service-worker.js ]; then
@@ -131,49 +121,32 @@ jobs:
             s += "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n";
           }
           fs.writeFileSync(p, s);
-          console.log('SW ok, length:', s.length);
           JS
 
-          # 2) version.json basato su commit: no banner se non cambia
           node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
 
-          # 3) pwa-update.js (controlla SW waiting + commit; niente banner se invariato)
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
             if(!('serviceWorker' in navigator)) return;
-
             var scopeGuess = '/gestore/';
             var FLAG = 'pwa-skip-waiting';
-            var PERIOD_MS = 15 * 60 * 1000;
-            var FIRST_START_DELAY = 2000;
             var VERSION_URL = scopeGuess + 'version.json?ts=' + Date.now();
             var LAST_KEY = 'pwa-last-commit';
-
+            var PERIOD_MS = 15*60*1000, FIRST_START_DELAY=2000;
             function banner(onAccept,onDismiss){
-              if (document.getElementById('pwa-update-banner')) return;
+              if(document.getElementById('pwa-update-banner')) return;
               var w=document.createElement('div');
               w.id='pwa-update-banner';
               w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border border-slate-200 bg-white shadow-xl p-4 flex items-start gap-3';
               w.innerHTML='<div class="flex-1"><h3 class="text-slate-900 font-semibold">Aggiornamento disponibile</h3><p class="text-slate-600 text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-200 text-slate-800">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
               document.body.appendChild(w);
               document.getElementById('pwa-update-later').onclick=function(){ w.remove(); onDismiss&&onDismiss(); };
-              document.getElementById('pwa-update-now').onclick=function(){
-                w.remove();
-                try { sessionStorage.setItem(FLAG,'1'); } catch(e){}
-                onAccept&&onAccept();
-              };
+              document.getElementById('pwa-update-now').onclick=function(){ w.remove(); try{sessionStorage.setItem(FLAG,'1');}catch(e){} onAccept&&onAccept(); };
             }
-
             navigator.serviceWorker.addEventListener('controllerchange', function(){
-              try {
-                if (sessionStorage.getItem(FLAG) === '1') {
-                  sessionStorage.removeItem(FLAG);
-                  location.reload();
-                }
-              } catch(e){}
+              try{ if(sessionStorage.getItem(FLAG)==='1'){ sessionStorage.removeItem(FLAG); location.reload(); } }catch(e){}
             });
-
             function wire(reg){
               function showIfWaiting(){
                 if(reg.waiting && navigator.serviceWorker.controller){
@@ -182,36 +155,26 @@ jobs:
               }
               showIfWaiting();
               reg.addEventListener('updatefound', function(){
-                var nw = reg.installing;
+                var nw=reg.installing;
                 nw && nw.addEventListener('statechange', function(){
                   if(nw.state==='installed' && navigator.serviceWorker.controller){ showIfWaiting(); }
                 });
               });
-
               function checkVersion(){
-                fetch(VERSION_URL, { cache: 'no-store' })
-                  .then(r=>r.json())
-                  .then(v=>{
-                    var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
-                    var cur = (v && v.commit) || '';
-                    if (cur && cur !== last && !reg.waiting) {
-                      banner(function(){
-                        try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){}
-                        location.reload();
-                      }, function(){});
-                    }
-                  }).catch(function(){});
+                fetch(VERSION_URL, {cache:'no-store'}).then(r=>r.json()).then(v=>{
+                  var last=''; try{ last=localStorage.getItem(LAST_KEY)||''; }catch(e){}
+                  var cur=(v&&v.commit)||'';
+                  if(cur && cur!==last && !reg.waiting){
+                    banner(function(){ try{localStorage.setItem(LAST_KEY,String(cur));}catch(e){} location.reload(); }, function(){});
+                  }
+                }).catch(function(){});
               }
-
-              var check = function(){ reg.update().catch(function(){}); checkVersion(); };
-              setTimeout(check, FIRST_START_DELAY);
+              var check=function(){ reg.update().catch(function(){}); checkVersion(); };
+              setTimeout(check, 2000);
               window.addEventListener('focus', check);
-              document.addEventListener('visibilitychange', function(){
-                if(document.visibilityState === 'visible') check();
-              });
+              document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='visible') check(); });
               setInterval(check, PERIOD_MS);
             }
-
             window.addEventListener('load', function(){
               (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) )
                 .then(function(reg){ return reg || navigator.serviceWorker.getRegistration(); })
@@ -222,7 +185,6 @@ jobs:
           fs.writeFileSync('dist/pwa-update.js', code);
           JS
 
-          # Inject pwa-update.js con cache-busting = BUILD_TAG
           if [ -f dist/index.html ]; then
             if grep -q "pwa-update.js" dist/index.html; then
               sed -i -E "s#pwa-update\.js(\?v=[^\"']+)?#pwa-update.js?v=${BUILD_TAG}#g" dist/index.html
@@ -231,11 +193,11 @@ jobs:
             fi
           fi
 
-          # 4) Email Reset Shim (aggancia il bottone senza toccare l'app)
           node - <<'JS'
           const fs = require('fs');
           const code = `(() => {
             const API = ${JSON.stringify(process.env.RESET_ENDPOINT || '')} || '';
+            let lastTs = 0; const THROTTLE_MS = 1500;
             function getScope(){
               const l=document.querySelector('link[rel="manifest"]');
               if(l&&l.getAttribute('href')){
@@ -261,28 +223,51 @@ jobs:
               if(email){ try{localStorage.setItem('gs_email', email);}catch(e){} }
               return email;
             }
-            function attach(el){
-              if(!el||el.__gs_bound) return; el.__gs_bound=true;
-              el.addEventListener('click',(ev)=>{
-                try{ev.preventDefault();ev.stopPropagation();}catch(e){}
-                const email=pickEmail();
-                if(email) sendReset(email);
-              },{capture:true});
+            function isResetNode(node){
+              if(!node || !(node instanceof Element)) return false;
+              if(node.hasAttribute('data-reset-mail')) return true;
+              const id=node.id||'', cls=node.className||'';
+              const title=node.getAttribute('title')||'';
+              const aria=node.getAttribute('aria-label')||'';
+              const text=(node.textContent||'').trim();
+              const rx=/((reset|reimposta|ripristina|réinitialiser).*(pin))|(pin).*(reset|reimposta|ripristina|réinitialiser)/i;
+              return [id,cls,title,aria,text].some(v=>rx.test(String(v)));
             }
-            function scan(){
-              document.querySelectorAll('[data-reset-mail]').forEach(attach);
-              const re=/(reset|reimposta).*(pin)|pin.*(reset|reimposta)/i;
-              const cand=[...document.querySelectorAll('button, a, [role="button"]')];
-              cand.filter(el=>re.test(el.textContent||'')).forEach(attach);
+            function findResetAncestor(start){
+              let el=start;
+              for(let i=0;i<6 && el;i++){
+                if(isResetNode(el)) return el;
+                el=el.parentElement;
+              }
+              return null;
             }
-            scan();
-            new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
+            function handleClick(ev){
+              const now=Date.now();
+              if(now - lastTs < THROTTLE_MS) return;
+              const target = findResetAncestor(ev.target);
+              if(!target) return;
+              lastTs = now;
+              try{ ev.preventDefault(); ev.stopPropagation(); }catch(e){}
+              const email = pickEmail();
+              if(email) sendReset(email);
+            }
+            window.addEventListener('click', handleClick, true);
+            function attachCandidates(){
+              document.querySelectorAll('[data-reset-mail],button,a,[role="button"]').forEach(el=>{
+                if(el.__gs_bound) return;
+                if(isResetNode(el)){
+                  el.__gs_bound = true;
+                  el.addEventListener('click', handleClick, true);
+                }
+              });
+            }
+            attachCandidates();
+            new MutationObserver(attachCandidates).observe(document.documentElement,{childList:true,subtree:true});
             window.gsResetTest = (email)=>sendReset(email);
           })();`;
           fs.writeFileSync('dist/email-reset-shim.js', code);
           JS
 
-          # Inject shim con cache-busting = BUILD_TAG
           if [ -f dist/index.html ]; then
             if grep -q "email-reset-shim.js" dist/index.html; then
               sed -i -E "s#email-reset-shim\.js(\?v=[^\"']+)?#email-reset-shim.js?v=${BUILD_TAG}#g" dist/index.html
@@ -296,7 +281,6 @@ jobs:
           echo '--- version.json ---'
           cat dist/version.json || true
 
-      # 5.2) Pagina /reset (validate/consume via JSONP) robusta
       - name: Add /reset page (Google Apps Script JSONP)
         working-directory: source
         shell: bash
@@ -390,7 +374,6 @@ jobs:
           mkdir -p dist/reset
           cp -R reset/* dist/reset/
 
-      # 6) Pubblica i file buildati su gh-pages della repo "gestore"
       - name: Push to gestore/gh-pages
         uses: peaceiris/actions-gh-pages@v3
         with:
