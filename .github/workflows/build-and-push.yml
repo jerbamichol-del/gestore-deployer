@@ -3,7 +3,7 @@ name: Build and push to gestore/gh-pages
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *" # ogni 10 minuti controlla aggiornamenti
+    - cron: "*/10 * * * *"  # ogni 10 minuti cerca aggiornamenti
 
 permissions:
   contents: write
@@ -11,15 +11,20 @@ permissions:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-
     steps:
-      # 1) Prende il codice dalla tua repo "gestore" (sorgente)
+      # 1) Prende il codice dalla tua repo "gestore"
       - name: Checkout gestore (source)
         uses: actions/checkout@v4
         with:
           repository: jerbamichol-del/gestore
           ref: main
           path: source
+
+      # 1.1) SHA del commit sorgente (per banner update affidabile)
+      - name: Read source commit SHA
+        id: srcsha
+        working-directory: source
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
       # 2) Node + deps
       - name: Setup Node
@@ -56,10 +61,12 @@ jobs:
           EOF
           npx vite build -c vite.pages.config.mjs
 
-      # 5) Copia manifest/icone, eventuale reset/, patch per /gestore/ + SPA fallback
+      # 5) Copia manifest/icone, reset/, patch per /gestore/ + SPA fallback
       - name: Patch PWA assets
         working-directory: source
         shell: bash
+        env:
+          BUILD_TAG: ${{ steps.srcsha.outputs.sha }}
         run: |
           set -e
           mkdir -p dist
@@ -89,45 +96,30 @@ jobs:
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
 
+          # Versiona i riferimenti con l'hash del commit (evita falsi banner)
+          sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${BUILD_TAG}\" />#" dist/index.html || true
+          sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${BUILD_TAG}', { scope: '/gestore/' })#" dist/index.html || true
+
           # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) Calcola FINGERPRINT dei file reali dell'app
-      - name: Compute build fingerprint
-        id: fp
-        working-directory: source/dist
-        shell: bash
-        run: |
-          set -e
-          if [ -d assets ]; then
-            FPR=$( ( { find assets -type f -print0 || true; [ -f manifest.json ] && printf '%s\0' manifest.json || true; } \
-                    | sort -z \
-                    | xargs -0 sha256sum \
-                    | sha256sum | cut -d' ' -f1 ) )
-          else
-            # fallback: hash di index.html se non ci sono asset
-            FPR=$(sha256sum index.html | cut -d' ' -f1)
-          fi
-          echo "fingerprint=$FPR" >> $GITHUB_OUTPUT
-
-      # 5.2) SW controllato + pwa-update (mostra solo se cambia fingerprint) + Email reset shim
-      - name: Ensure SW, pwa-update, reset shim
+      # 5.1) SW controllato + pwa-update (solo se cambia commit) + shim reset NO modali
+      - name: Ensure PWA update & reset mail shim
         working-directory: source
         shell: bash
         env:
-          FINGERPRINT: ${{ steps.fp.outputs.fingerprint }}
+          BUILD_TAG: ${{ steps.srcsha.outputs.sha }}
           RESET_ENDPOINT: "https://script.google.com/macros/s/AKfycbzmq-PTrMcMdrYqCRX29_S034zCaj5ttyc3tZhdhjV77wF6n99LKricFgzy7taGqKOo/exec"
         run: |
           set -e
           mkdir -p dist
 
-          # --- Service Worker: usa quello del repo o placeholder
+          # --- Service worker pulito ---
           if [ -f service-worker.js ]; then
             cp -fv service-worker.js dist/service-worker.js
           elif [ ! -f dist/service-worker.js ]; then
             echo "// placeholder SW" > dist/service-worker.js
           fi
-          # Pulisci skipWaiting automatici e lascia un solo listener canonico
           sed -i -E 's/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g' dist/service-worker.js || true
           sed -i -E 's/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g' dist/service-worker.js || true
           node - <<'JS'
@@ -141,10 +133,10 @@ jobs:
           fs.writeFileSync(p, s);
           JS
 
-          # --- version.json con fingerprint stabile (niente falsi positivi)
-          node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ fingerprint: process.env.FINGERPRINT, builtAt: new Date().toISOString() }, null, 2))"
+          # --- version.json con commit stabile ---
+          node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
 
-          # --- pwa-update.js: mostra banner solo se cambia fingerprint o se c'è SW waiting
+          # --- pwa-update: banner SOLO se cambia commit ---
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -154,96 +146,68 @@ jobs:
             var PERIOD_MS = 15 * 60 * 1000;
             var FIRST_START_DELAY = 2000;
             var VERSION_URL = scopeGuess + 'version.json?ts=' + Date.now();
-            var LAST_KEY = 'pwa-last-fingerprint';
-
+            var LAST_KEY = 'pwa-last-commit';
             function banner(onAccept,onDismiss){
               if (document.getElementById('pwa-update-banner')) return;
               var w=document.createElement('div');
               w.id='pwa-update-banner';
-              w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border border-slate-200 bg-white shadow-xl p-4 flex items-start gap-3';
-              w.innerHTML='<div class="flex-1"><h3 class="text-slate-900 font-semibold">Aggiornamento disponibile</h3><p class="text-slate-600 text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-200 text-slate-800">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
+              w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border bg-white shadow-xl p-4 flex items-start gap-3';
+              w.innerHTML='<div class="flex-1"><h3 class="font-semibold">Aggiornamento disponibile</h3><p class="text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-200">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
               document.body.appendChild(w);
               document.getElementById('pwa-update-later').onclick=function(){ w.remove(); onDismiss&&onDismiss(); };
               document.getElementById('pwa-update-now').onclick=function(){ w.remove(); try { sessionStorage.setItem(FLAG,'1'); } catch(e){} onAccept&&onAccept(); };
             }
-
             navigator.serviceWorker.addEventListener('controllerchange', function(){
               try { if (sessionStorage.getItem(FLAG) === '1') { sessionStorage.removeItem(FLAG); location.reload(); } } catch(e){}
             });
-
             function wire(reg){
-              function showIfWaiting(){
-                if(reg.waiting && navigator.serviceWorker.controller){
-                  banner(function(){ reg.waiting && reg.waiting.postMessage({type:'SKIP_WAITING'}); }, function(){});
-                }
-              }
+              function showIfWaiting(){ if(reg.waiting && navigator.serviceWorker.controller){ banner(function(){ reg.waiting && reg.waiting.postMessage({type:'SKIP_WAITING'}); }, function(){}); } }
               showIfWaiting();
-              reg.addEventListener('updatefound', function(){
-                var nw = reg.installing;
-                nw && nw.addEventListener('statechange', function(){
-                  if(nw.state==='installed' && navigator.serviceWorker.controller){ showIfWaiting(); }
-                });
-              });
-
+              reg.addEventListener('updatefound', function(){ var nw = reg.installing; nw && nw.addEventListener('statechange', function(){ if(nw.state==='installed' && navigator.serviceWorker.controller){ showIfWaiting(); } }); });
               function checkVersion(){
-                fetch(VERSION_URL, { cache: 'no-store' })
-                  .then(r=>r.json())
-                  .then(v=>{
-                    var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
-                    var cur = (v && v.fingerprint) || '';
-                    if (cur && cur !== last) {
-                      if (!reg.waiting) {
-                        banner(function(){
-                          try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){}
-                          location.reload();
-                        }, function(){});
-                      }
-                    }
-                  }).catch(function(){});
+                fetch(VERSION_URL, { cache: 'no-store' }).then(r=>r.json()).then(v=>{
+                  var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
+                  var cur = (v && v.commit) || '';
+                  if (cur && cur !== last) {
+                    if (!reg.waiting) banner(function(){ try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){} location.reload(); }, function(){});
+                  }
+                }).catch(function(){});
               }
-
               var check = function(){ reg.update().catch(function(){}); checkVersion(); };
               setTimeout(check, FIRST_START_DELAY);
               window.addEventListener('focus', check);
               document.addEventListener('visibilitychange', function(){ if(document.visibilityState === 'visible') check(); });
               setInterval(check, PERIOD_MS);
             }
-
             window.addEventListener('load', function(){
-              (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) )
-                .then(function(reg){ return reg || navigator.serviceWorker.getRegistration(); })
-                .then(function(reg){ reg && wire(reg); })
-                .catch(function(){});
+              (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) ).then(function(reg){ return reg || navigator.serviceWorker.getRegistration(); }).then(function(reg){ reg && wire(reg); }).catch(function(){});
             });
           })();`;
           fs.writeFileSync('dist/pwa-update.js', code);
           JS
 
-          # Inietta pwa-update.js con cache-busting = fingerprint
+          # Inietta pwa-update.js (cache-busting = BUILD_TAG)
           if [ -f dist/index.html ]; then
             if grep -q "pwa-update.js" dist/index.html; then
-              sed -i -E "s#pwa-update\\.js(\\?v=[^\"']+)?#pwa-update.js?v=${FINGERPRINT}#g" dist/index.html
+              sed -i -E "s#pwa-update\.js(\?v=[^\"']+)?#pwa-update.js?v=${BUILD_TAG}#g" dist/index.html
             else
-              sed -i "s#</body>#  <script type=\"module\" src=\"./pwa-update.js?v=${FINGERPRINT}\"></script>\n</body>#" dist/index.html
+              sed -i "s#</body>#  <script type=\"module\" src=\"./pwa-update.js?v=${BUILD_TAG}\"></script>\n</body>#" dist/index.html
             fi
           fi
 
-          # --- Email Reset Shim (prudente) + MODALE PIN che si apre anche senza click
+          # --- Email Reset Shim (nessun modale/alert, nessun trigger automatico) ---
           node - <<'JS'
           const fs = require('fs');
-          const API = process.env.RESET_ENDPOINT || '';
-          const code = `(() => {
+          const api = process.env.RESET_ENDPOINT || '';
+          const code = `(()=>{
             if (location.pathname.includes('/reset/')) return;
-            const API = ${JSON.stringify(API)};
+            const API = ${JSON.stringify(api)};
             if (!API) return;
 
-            // "armed" solo per invio mail, NON per mostrare il modale PIN
-            let armed = false;
-            const arm = () => { armed = true; enable(); window.removeEventListener('pointerdown', arm, true); window.removeEventListener('keydown', arm, true); };
-            window.addEventListener('pointerdown', arm, true);
-            window.addEventListener('keydown', arm, true);
-
-            let inFlight = false, lastSent = 0;
+            let armed=false, inFlight=false, lastSent=0;
+            const arm=()=>{ armed=true; window.removeEventListener('pointerdown',arm,true); window.removeEventListener('keydown',arm,true); };
+            window.addEventListener('pointerdown',arm,true);
+            window.addEventListener('keydown',arm,true);
 
             function getScope(){
               const l=document.querySelector('link[rel="manifest"]');
@@ -255,112 +219,100 @@ jobs:
             const SCOPE=getScope();
             const REDIRECT=location.origin+SCOPE+'reset/';
 
-            function sendReset(email){
-              if (!armed) return;
-              if (!email || !API) return;
-              const now = Date.now();
-              if (inFlight || (now - lastSent) < 8000) return;
-              inFlight = true; lastSent = now;
+            function send(email){
+              if(!armed || !email || !API) return;
+              const now=Date.now(); if(inFlight || (now-lastSent)<6000) return; // debounce 6s
+              inFlight=true; lastSent=now;
               const url=API+'?action=request&email='+encodeURIComponent(email)+'&redirect='+encodeURIComponent(REDIRECT);
-              try { fetch(url,{method:'GET',cache:'no-store',mode:'no-cors'}) } catch(e) {}
-              setTimeout(()=>{ inFlight=false; }, 1500);
-              try { alert('Se esiste un account con questa email, riceverai un link di reset.'); } catch(e){}
+              try{ fetch(url,{method:'GET',cache:'no-store',mode:'no-cors'}) }catch(e){}
+              setTimeout(()=>{ inFlight=false; },1200);
+              try{ localStorage.setItem('gs_last_reset_request', String(Date.now())); }catch(e){}
+              // niente alert/modale
             }
 
             function pickEmail(){
-              try{const s=localStorage.getItem('gs_email'); if(s) return s;}catch(e){}
-              const email=prompt('Inserisci la tua email per resettare il PIN:');
-              if(email){ try{localStorage.setItem('gs_email', email);}catch(e){} }
-              return email;
+              try{ const v=localStorage.getItem('gs_email'); if(v) return v; }catch(e){}
+              // se l'app ha già messo l'email nell'input, la riuso
+              const inp=[...document.querySelectorAll('input[type="email"],input[autocomplete="email"]')].find(i=>i.value && i.value.includes('@'));
+              return inp ? inp.value : null;
+            }
+
+            function matchResetButton(el){
+              if(!el) return false;
+              const t=(el.textContent||'').toLowerCase();
+              if(t.includes('invia') && t.includes('reset') && (t.includes('link')||t.includes('pin'))) return true;
+              if(el.hasAttribute('data-reset-mail')) return true;
+              return false;
             }
 
             function attach(el){
-              if(!el||el.__gs_bound) return; el.__gs_bound=true;
-              el.addEventListener('click',(ev)=>{
-                if (!armed) return;
-                if (!ev.isTrusted) return;
-                try{ev.preventDefault();ev.stopPropagation();}catch(e){}
-                const email=pickEmail();
-                if(email) sendReset(email);
-              },{capture:true});
+              if(!el || el.__gs_bound) return; el.__gs_bound=true;
+              el.addEventListener('click', (ev)=>{
+                if(!armed || !ev.isTrusted) return;
+                try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){}
+                const email = pickEmail();
+                send(email);
+              }, {capture:true});
             }
 
-            // Bottoni da agganciare (meglio se metti data-reset-mail sul tuo bottone)
-            function findResetButtons(){
-              const direct=[...document.querySelectorAll('[data-reset-mail]')];
-              if (direct.length) return direct;
-              const all=[...document.querySelectorAll('button, [role="button"], a')];
-              return all.filter(el=>{
-                const t=(el.textContent||'').trim().toLowerCase();
-                return (t.includes('invia')||t.includes('manda')) && t.includes('reset') && (t.includes('link')||t.includes('pin'));
+            function scan(){
+              document.querySelectorAll('button, a, [role="button"], [data-reset-mail]').forEach(btn=>{
+                if(matchResetButton(btn)) attach(btn);
               });
             }
-
-            // ---- MODALE PIN (si apre anche senza click, se c'è reset pendente)
-            function showPinModal(){
-              if (document.getElementById('gs-pin-modal')) return;
-              const wrap=document.createElement('div');
-              wrap.id='gs-pin-modal';
-              wrap.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:99999;';
-              const card=document.createElement('div');
-              card.style.cssText='width:min(92%,420px);background:#fff;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.2);padding:20px;font-family:system-ui,Arial,sans-serif;';
-              card.innerHTML = 
-                '<h2 style="margin:0 0 8px;font-size:18px">Imposta nuovo PIN</h2>'+
-                '<p style="margin:0 0 12px;color:#475569;font-size:14px">Inserisci e conferma un PIN di 4–6 cifre.</p>'+
-                '<div style="display:flex;gap:8px;flex-direction:column">'+
-                '  <input id="gs-pin1" inputmode="numeric" pattern="\\d*" minlength="4" maxlength="6" placeholder="Nuovo PIN" style="padding:10px;border:1px solid #cbd5e1;border-radius:10px;font-size:16px">'+
-                '  <input id="gs-pin2" inputmode="numeric" pattern="\\d*" minlength="4" maxlength="6" placeholder="Conferma PIN" style="padding:10px;border:1px solid #cbd5e1;border-radius:10px;font-size:16px">'+
-                '  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">'+
-                '    <button id="gs-pin-cancel" style="padding:8px 12px;border-radius:10px;background:#e2e8f0">Annulla</button>'+
-                '    <button id="gs-pin-save" style="padding:8px 12px;border-radius:10px;background:#4f46e5;color:#fff">Salva</button>'+
-                '  </div>'+
-                '</div>';
-              wrap.appendChild(card); document.body.appendChild(wrap);
-              const $ = (sel)=>card.querySelector(sel);
-              $('#gs-pin-cancel').onclick=()=>{ wrap.remove(); };
-              $('#gs-pin-save').onclick=()=>{
-                const p1 = $('#gs-pin1').value.replace(/\\D/g,'');
-                const p2 = $('#gs-pin2').value.replace(/\\D/g,'');
-                if (!/^\\d{4,6}$/.test(p1)) { alert('PIN non valido (4–6 cifre).'); return; }
-                if (p1!==p2) { alert('I PIN non coincidono.'); return; }
-                try { localStorage.setItem('gs_pin', p1); } catch(e) {}
-                try { localStorage.setItem('pin', p1); } catch(e) {}
-                try { localStorage.removeItem('gs_pin_reset_pending'); } catch(e) {}
-                try { window.dispatchEvent(new CustomEvent('gs-pin-updated',{detail:{pin:p1}})); } catch(e) {}
-                alert('PIN aggiornato.');
-                wrap.remove();
-              };
-            }
-            function checkPending(){ try { if (localStorage.getItem('gs_pin_reset_pending')==='1') showPinModal(); } catch(e) {} }
-
-            // Scansione bottoni (solo quando armed)
-            function scan(){ if (!armed) return; findResetButtons().forEach(attach); }
-            const mo = new MutationObserver(scan);
-            function enable(){ scan(); mo.observe(document.documentElement,{childList:true,subtree:true}); }
-
-            // Mostra modale PIN appena possibile (anche senza click)
-            checkPending();
-            document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') checkPending(); });
-            window.addEventListener('focus', checkPending);
-            // helper manuale
-            window.gsResetTest = (email)=>{ if (!armed) { armed=true; enable(); } sendReset(email); };
+            scan();
+            new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
+            window.gsResetTest=(e)=>send(e); // helper opzionale
           })();`;
           fs.writeFileSync('dist/email-reset-shim.js', code);
           JS
 
-          # Inietta lo shim (cache-busting = fingerprint)
+          # Inietta lo shim (cache-busting = BUILD_TAG)
           if [ -f dist/index.html ]; then
             if grep -q "email-reset-shim.js" dist/index.html; then
-              sed -i -E "s#email-reset-shim\\.js(\\?v=[^\"']+)?#email-reset-shim.js?v=${FINGERPRINT}#g" dist/index.html
+              sed -i -E "s#email-reset-shim\.js(\?v=[^\"']+)?#email-reset-shim.js?v=${BUILD_TAG}#g" dist/index.html
             else
-              sed -i "s#</body>#  <script type=\"module\" src=\"./email-reset-shim.js?v=${FINGERPRINT}\"></script>\n</body>#" dist/index.html
+              sed -i "s#</body>#  <script type=\"module\" src=\"./email-reset-shim.js?v=${BUILD_TAG}\"></script>\n</body>#" dist/index.html
             fi
           fi
 
-          echo '--- version.json ---'
+          # --- Bridge all'avvio: se rientri da /reset, nasconde "Controlla la tua email" ---
+          node - <<'JS'
+          const fs = require('fs');
+          const code = `(()=> {
+            function hideEmailScreen(){
+              const nodes=[...document.querySelectorAll('*')];
+              nodes.forEach(n=>{
+                const t=(n.textContent||'').toLowerCase();
+                if(t.includes('controlla la tua email')){ n.style.display='none'; }
+              });
+            }
+            function run(){
+              try{
+                const flag = localStorage.getItem('gs_force_new_pin');
+                if(flag==='1'){ hideEmailScreen(); }
+              }catch(e){}
+            }
+            run();
+            new MutationObserver(run).observe(document.documentElement,{childList:true,subtree:true});
+          })();`;
+          fs.writeFileSync('dist/pin-bridge.js', code);
+          JS
+
+          # Iniezione del bridge (cache-busting = BUILD_TAG)
+          if [ -f dist/index.html ]; then
+            if grep -q "pin-bridge.js" dist/index.html; then
+              sed -i -E "s#pin-bridge\.js(\?v=[^\"']+)?#pin-bridge.js?v=${BUILD_TAG}#g" dist/index.html
+            else
+              sed -i "s#</body>#  <script type=\"module\" src=\"./pin-bridge.js?v=${BUILD_TAG}\"></script>\n</body>#" dist/index.html
+            fi
+          fi
+
+          # Log utili
+          tail -n 30 dist/service-worker.js || true
           cat dist/version.json || true
 
-      # 5.3) Pagina /reset (validate/consume via JSONP): setta flag per modale PIN
+      # 5.2) Pagina /reset (validate/consume via JSONP) — set flag e torna all'app
       - name: Add /reset page (Google Apps Script JSONP)
         working-directory: source
         shell: bash
@@ -374,16 +326,16 @@ jobs:
           const html = `<!doctype html><html lang="it"><head>
           <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
           <title>Reimposta PIN</title>
-          <script src="https://cdn.tailwindcss.com"></script>
+          <style>body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial} .box{max-width:480px;margin:12vh auto;background:#fff;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.08);padding:24px}</style>
           </head>
-          <body class="min-h-screen flex items-center justify-center bg-slate-100 p-4">
-            <main class="w-full max-w-md bg-white shadow-xl rounded-2xl p-6 space-y-4">
-              <h1 class="text-xl font-semibold text-slate-900">Reimposta PIN</h1>
-              <div id="msg" class="text-slate-700">Verifica del link…</div>
-              <div id="ok" class="space-y-3" style="display:none">
-                <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset.</p>
-                <button id="go" class="w-full rounded-lg py-2 bg-indigo-600 text-white">Conferma reset</button>
-                <p class="text-xs text-slate-500">Dopo la conferma, torna nell’app <b>Gestore Spese</b> per impostare il nuovo PIN.</p>
+          <body style="background:#f1f5f9;padding:16px">
+            <main class="box">
+              <h1 style="font-size:20px;margin:0 0 12px">Reimposta PIN</h1>
+              <div id="msg">Verifica del link…</div>
+              <div id="ok" style="display:none;margin-top:10px">
+                <p>Il link è valido. Premi “Conferma” per procedere al reset.</p>
+                <button id="go" style="padding:10px 12px;border-radius:10px;background:#4f46e5;color:#fff;border:0">Conferma reset</button>
+                <p style="font-size:12px;color:#475569;margin-top:10px">Dopo la conferma, torna nell’app <b>Gestore Spese</b> e imposta un nuovo PIN.</p>
               </div>
             </main>
             <script>
@@ -401,36 +353,23 @@ jobs:
                 };
                 document.head.appendChild(s);
               }
-              function scopeGuess(){
-                try{
-                  var m=document.querySelector('link[rel="manifest"]');
-                  if(m){
-                    var u=new URL(m.getAttribute('href')||'', location.href);
-                    var mm=u.pathname.match(/^\\/([^/]+)\\//); if(mm) return '/'+mm[1]+'/';
-                  }
-                }catch(e){}
-                return '/gestore/';
-              }
-              var SCOPE = scopeGuess();
-              var params = new URL(location.href).searchParams;
-              var t = params.get('t') || params.get('token') || params.get('code') || params.get('k');
+              var t = new URL(location.href).searchParams.get('t') || new URL(location.href).searchParams.get('token');
               var msg = document.getElementById('msg'), ok = document.getElementById('ok');
               function showInvalid(){ ok.style.display='none'; msg.style.display='block'; msg.textContent='Link non valido o scaduto.'; }
               function showValid(){ msg.style.display='none'; ok.style.display='block'; }
-              if(!t || !ENDPOINT){ showInvalid(); return; }
+              if(!ENDPOINT || !t){ showInvalid(); return; }
               jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
                 if(!(v&&v.ok)){ showInvalid(); return; }
                 showValid();
                 document.getElementById('go').onclick=function(){
                   jsonp(ENDPOINT+'?action=consume&t='+encodeURIComponent(t), function(c){
                     if(c&&c.ok){
-                      try { localStorage.setItem('gs_pin_reset_pending','1'); } catch(e){}
-                      msg.textContent='Reset confermato. Torna nell\\'app per impostare il nuovo PIN.';
-                      ok.style.display='none';
-                      setTimeout(function(){ location.href = location.origin + SCOPE; }, 800);
-                    } else {
-                      msg.textContent='Qualcosa è andato storto. Riprova.';
-                      ok.style.display='none';
+                      try{ localStorage.setItem('gs_force_new_pin','1'); }catch(e){}
+                      // torna all'app
+                      var base = location.origin + '/gestore/';
+                      location.href = base;
+                    }else{
+                      showInvalid();
                     }
                   });
                 };
