@@ -20,7 +20,7 @@ jobs:
           ref: main
           path: source
 
-      # 1.1) SHA del commit sorgente (versioning stabile per il banner)
+      # 1.1) SHA del commit sorgente (per il banner solo-when-changes)
       - name: Read source commit SHA
         id: srcsha
         working-directory: source
@@ -103,7 +103,7 @@ jobs:
           # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) SW pulito + pwa-update (niente falsi banner) + SHIM reset mail + Bridge new-PIN
+      # 5.1) SW pulito + pwa-update (no falsi banner) + SHIM reset (non blocca) + Bridge new-PIN
       - name: Ensure PWA update prompt, email reset shim & PIN bridge
         working-directory: source
         shell: bash
@@ -138,10 +138,10 @@ jobs:
           console.log('SW ok, length:', s.length);
           JS
 
-          # --- version.json con commit stabile (mostra banner solo quando cambia)
+          # --- version.json con commit stabile
           node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
 
-          # --- pwa-update.js
+          # --- pwa-update.js: banner solo se cambia il commit
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -219,15 +219,14 @@ jobs:
             fi
           fi
 
-          # --- Email Reset SHIM (niente modali/alert; prende email dall'input vicino al bottone)
+          # --- Email Reset SHIM (non blocca il click; prende email dall'input vicino)
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
-            if (location.pathname.includes('/reset/')) return; // non agire nella pagina reset
+            if (location.pathname.includes('/reset/')) return;
             const API = ${JSON.stringify(process.env.RESET_ENDPOINT || '')};
             if (!API) return;
 
-            // si attiva solo dopo una vera interazione dell'utente
             let armed=false;
             const arm=()=>{ armed=true; enable(); window.removeEventListener('pointerdown',arm,true); window.removeEventListener('keydown',arm,true); };
             window.addEventListener('pointerdown',arm,true);
@@ -248,7 +247,6 @@ jobs:
             const REDIRECT=location.origin+SCOPE+'reset/';
 
             function readEmailNear(el){
-              // cerca un input di tipo email/testo nel raggio del form/pannello
               let root=el.closest('form') || el.closest('div') || document;
               let inp = root.querySelector('input[type="email"], input[type="text"]');
               let v = inp && (inp.value||'').trim();
@@ -256,30 +254,27 @@ jobs:
             }
 
             function sendReset(email){
-              if (!armed) return;
-              if (!email || !API) return;
+              if (!armed || !email) return;
               const now=Date.now();
-              if (inFlight || (now-lastSent)<5000) return; // debounce 5s
+              if (inFlight || (now-lastSent)<5000) return;
               inFlight=true; lastSent=now;
               const url=API+'?action=request&email='+encodeURIComponent(email)+'&redirect='+encodeURIComponent(REDIRECT);
               try{ fetch(url,{method:'GET',cache:'no-store',mode:'no-cors'}) }catch(e){}
               const img=new Image(); img.src=url+'&_b=1';
               setTimeout(()=>{ inFlight=false; },1200);
-              // nessun alert: non bloccare il passaggio alla schermata successiva
             }
 
             function attach(el){
               if(!el||el.__gs_bound) return; el.__gs_bound=true;
               el.addEventListener('click',(ev)=>{
                 if (!armed || !ev.isTrusted) return;
-                try{ev.preventDefault();ev.stopPropagation();}catch(e){}
                 const email = readEmailNear(el) || (localStorage.getItem('gs_email')||'');
-                if (email) { try{ localStorage.setItem('gs_email', email); }catch(e){} sendReset(email); }
+                if (email) { try{ localStorage.setItem('gs_email', email);}catch(e){} sendReset(email); }
+                // Non blocchiamo il click → la tua UI mostra "Controlla la tua Email"
               },{capture:true});
             }
 
             function scan(){
-              // bottone con testo “Invia Link di Reset” o custom data-attr
               document.querySelectorAll('[data-reset-mail]').forEach(attach);
               [...document.querySelectorAll('button, a, [role="button"]')].forEach(el=>{
                 const t=(el.textContent||'').toLowerCase();
@@ -290,7 +285,7 @@ jobs:
             function enable(){
               scan();
               new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
-              window.gsResetTest = (email)=> sendReset(email); // helper
+              window.gsResetTest = (email)=> sendReset(email);
             }
           })();`;
           fs.writeFileSync('dist/email-reset-shim.js', code);
@@ -305,10 +300,15 @@ jobs:
             fi
           fi
 
-          # --- PIN BRIDGE: porta alla schermata “Crea un nuovo PIN”
+          # --- PIN BRIDGE: forza apertura “Crea un nuovo PIN”
           node - <<'JS'
           const fs = require('fs');
           const code = `(()=> {
+            function mark(){ try{localStorage.setItem('gs_force_new_pin','1'); sessionStorage.setItem('gs_force_new_pin','1');}catch(e){} }
+            try{ if(new URL(location.href).searchParams.get('resetpin')==='1') mark(); }catch(e){}
+
+            function flagOn(){ try{ return localStorage.getItem('gs_force_new_pin')==='1' || sessionStorage.getItem('gs_force_new_pin')==='1'; }catch(e){ return false; } }
+
             function isNewPinScreen(){
               const headers=[...document.querySelectorAll('h1,h2,h3')].map(n=>(n.textContent||'').trim().toLowerCase());
               if (headers.some(t=>t.includes('crea un nuovo pin'))) return true;
@@ -316,51 +316,53 @@ jobs:
               const hasKeypad=['0','1','2','3','4','5','6','7','8','9'].every(x=>keys.includes(x));
               return hasKeypad && headers.join(' ').includes('pin');
             }
+
             function clickCandidates(){
-              const btns=[...document.querySelectorAll('button,a,[role=\"button\"]')];
+              const btns=[...document.querySelectorAll('button,a,[role="button"]')];
               const c = btns.find(b=>{
                 const t=(b.textContent||'').toLowerCase();
                 return t.includes('pin') && (t.includes('crea')||t.includes('nuovo')||t.includes('imposta')||t.includes('reimposta'));
               });
               if (c) c.click();
             }
+
             function tryRoutes(){
               const base = location.origin + '/gestore/';
-              const guesses = [
-                '#/new-pin','#/pin/new','#/set-pin','#/reset-pin','#/pin',
-                '/pin/new','/set-pin','/reset-pin','/auth/pin','/pin'
-              ];
+              const hashes=['#/new-pin','#/set-pin','#/create-pin','#/pin/new','#/auth/new-pin','#/reset-pin','#/pin/setup','#/pin'];
+              const paths=['pin/new','set-pin','create-pin','auth/new-pin','reset-pin','pin/setup','pin'];
               let i=0;
+              const start=Date.now();
               const tick=()=>{
-                if (isNewPinScreen()) { return; }
-                if (i>=guesses.length) { clickCandidates(); return; }
-                const r=guesses[i++];
-                if (r.startsWith('#')) {
+                if(isNewPinScreen()) return;
+                if(Date.now()-start>6000){ clickCandidates(); return; }
+                const r = (i<hashes.length) ? hashes[i++] : paths[i++-hashes.length];
+                if(!r){ clickCandidates(); return; }
+                if(r.startsWith('#')){
                   if (location.pathname !== '/gestore/') history.replaceState(null,'',base);
-                  location.hash=r;
+                  location.hash = r;
                   window.dispatchEvent(new HashChangeEvent('hashchange'));
                 } else {
-                  history.pushState(null,'', base.replace(/\/$/,'') + r);
+                  history.pushState(null,'', base.replace(/\/$/,'') + '/' + r.replace(/^\//,''));
                   window.dispatchEvent(new PopStateEvent('popstate'));
                 }
-                setTimeout(tick, 500);
+                setTimeout(tick, 400);
               };
               tick();
             }
+
             function hideEmailScreen(){
               [...document.querySelectorAll('*')].forEach(n=>{
                 const t=(n.textContent||'').toLowerCase();
                 if (t.includes('controlla la tua email')) n.style.display='none';
               });
             }
+
             function run(){
-              let flag=false;
-              try { flag = localStorage.getItem('gs_force_new_pin')==='1'; } catch(e){}
-              const urlFlag = new URL(location.href).searchParams.get('resetpin')==='1';
-              if (!(flag || urlFlag)) return;
+              if(!flagOn()) return;
               hideEmailScreen();
-              if (!isNewPinScreen()) tryRoutes();
+              tryRoutes();
             }
+
             run();
             new MutationObserver(run).observe(document.documentElement,{childList:true,subtree:true});
           })();`;
@@ -404,7 +406,7 @@ jobs:
               <div id="ok" class="space-y-3" style="display:none">
                 <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset.</p>
                 <button id="go" class="w-full rounded-lg py-2 bg-indigo-600 text-white">Conferma reset</button>
-                <p class="text-xs text-slate-500">Dopo la conferma, si aprirà la schermata per creare il nuovo PIN.</p>
+                <p class="text-xs text-slate-500">Dopo la conferma si aprirà la schermata per creare il nuovo PIN.</p>
               </div>
             </main>
             <script>
@@ -455,7 +457,7 @@ jobs:
                 document.getElementById('go').onclick=function(){
                   jsonp(ENDPOINT+'?action=consume&'+(paramUsed||'t')+'='+encodeURIComponent(t), function(c){
                     if(c && c.ok){
-                      try{ localStorage.setItem('gs_force_new_pin','1'); }catch(e){}
+                      try{ localStorage.setItem('gs_force_new_pin','1'); sessionStorage.setItem('gs_force_new_pin','1'); }catch(e){}
                       var base = location.origin + '/gestore/';
                       location.replace(base + '?resetpin=1#new-pin');
                     }else{
