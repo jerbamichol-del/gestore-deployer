@@ -64,7 +64,7 @@ jobs:
           EOF
           npx vite build -c vite.pages.config.mjs
 
-      # 5) Patch PWA (manifest/icone, copy reset/, fallback SPA)
+      # 5) Patch PWA (manifest/icone, copia reset/, fallback SPA)
       - name: Patch PWA assets
         working-directory: source
         shell: bash
@@ -106,8 +106,8 @@ jobs:
           # SPA fallback
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) SW controllato + banner update (commit-based) + reset shim (armato dopo input)
-      - name: Ensure PWA update prompt & controlled SW
+      # 5.1) SW controllato + banner update (commit-based, con forzatura) + reset shim
+      - name: Ensure SW + pwa-update + reset shim
         working-directory: source
         shell: bash
         env:
@@ -142,7 +142,7 @@ jobs:
           # version.json con commit stabile
           echo "{\"commit\":\"${BUILD_TAG}\",\"builtAt\":\"$(date -u +%FT%TZ)\"}" > dist/version.json
 
-          # pwa-update.js (banner solo se cambia commit)
+          # pwa-update.js (banner solo se cambia commit; forzabile con ?update=1)
           cat > dist/pwa-update.js << 'EOF'
           (function(){
             if(!('serviceWorker' in navigator)) return;
@@ -152,6 +152,7 @@ jobs:
             var FIRST_START_DELAY = 2000;
             var VERSION_URL = scopeGuess + 'version.json?ts=' + Date.now();
             var LAST_KEY = 'pwa-last-commit';
+            var FORCE = /[?&](update|force|force-update)=1/.test(location.search);
 
             function banner(onAccept,onDismiss){
               if (document.getElementById('pwa-update-banner')) return;
@@ -188,7 +189,7 @@ jobs:
                   .then(v=>{
                     var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
                     var cur = (v && v.commit) || '';
-                    if (cur && cur !== last) {
+                    if (FORCE || (cur && cur !== last)) {
                       if (!reg.waiting) {
                         banner(function(){
                           try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){}
@@ -224,13 +225,14 @@ jobs:
             fi
           fi
 
-          # email-reset-shim.js (armato solo dopo gesto utente, anti auto-click, debounce)
+          # email-reset-shim.js (armed dopo gesto; salva nuovo PIN se reset confermato)
           cat > dist/email-reset-shim.js << 'EOF'
           (() => {
             if (location.pathname.includes('/reset/')) return;
             const API = '__RESET_ENDPOINT__';
             if (!API) return;
 
+            // Armare solo dopo un gesto reale
             let armed = false, inFlight = false, lastSent = 0;
             const arm = () => { armed = true; enable(); window.removeEventListener('pointerdown', arm, true); window.removeEventListener('keydown', arm, true); };
             window.addEventListener('pointerdown', arm, true);
@@ -252,7 +254,7 @@ jobs:
             function sendReset(email){
               if (!armed || !email || !API) return;
               const now = Date.now();
-              if (inFlight || (now - lastSent) < 8000) return; // debounce 8s
+              if (inFlight || (now - lastSent) < 8000) return; // debounce
               inFlight = true; lastSent = now;
               const url=API+'?action=request&email='+encodeURIComponent(email)+'&redirect='+encodeURIComponent(REDIRECT);
               try { fetch(url,{method:'GET',cache:'no-store',mode:'no-cors'}) } catch(e) {}
@@ -285,6 +287,44 @@ jobs:
               });
             }
 
+            // Prompt per nuovo PIN se il reset è stato confermato dalla pagina /reset/
+            function maybeAskForNewPin(){
+              try{
+                if(localStorage.getItem('gs_pin_reset_ready')==='1'){
+                  localStorage.removeItem('gs_pin_reset_ready');
+                  showPinModal();
+                }
+              }catch(e){}
+            }
+
+            function showPinModal(){
+              const wrap=document.createElement('div');
+              wrap.innerHTML = `
+                <div id="gs-pin-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px">
+                  <div style="background:#fff;border-radius:16px;max-width:380px;width:100%;box-shadow:0 10px 30px rgba(0,0,0,.2);padding:18px">
+                    <h3 style="margin:0 0 10px;font:600 18px system-ui">Imposta nuovo PIN</h3>
+                    <p style="margin:0 0 12px;color:#475569">Inserisci un PIN di 4-6 cifre.</p>
+                    <input id="gs-new-pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:16px;letter-spacing:4px;text-align:center" placeholder="••••" />
+                    <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">
+                      <button id="gs-cancel" style="padding:8px 12px;border-radius:10px;border:1px solid #e2e8f0;background:#fff;color:#0f172a">Annulla</button>
+                      <button id="gs-save" style="padding:8px 12px;border-radius:10px;background:#4f46e5;color:#fff">Salva PIN</button>
+                    </div>
+                  </div>
+                </div>`;
+              document.body.appendChild(wrap.firstElementChild);
+              const modal=document.getElementById('gs-pin-modal');
+              document.getElementById('gs-cancel').onclick=()=>modal.remove();
+              document.getElementById('gs-save').onclick=()=>{
+                const v=(document.getElementById('gs-new-pin').value||'').trim();
+                if(!/^[0-9]{4,6}$/.test(v)){ alert('PIN non valido. Usa 4-6 cifre.'); return; }
+                ['pin','PIN','gs_pin','app_pin','userPin'].forEach(k=>{ try{localStorage.setItem(k,v);}catch(e){} });
+                try{ localStorage.setItem('pinSetAt', String(Date.now())); }catch(e){}
+                window.dispatchEvent(new CustomEvent('gs:pin-updated',{detail:{at:Date.now()}}));
+                modal.remove();
+                alert('PIN aggiornato.');
+              };
+            }
+
             function scan(){
               if (!armed) return;
               document.querySelectorAll('[data-reset-mail]').forEach(attach);
@@ -292,7 +332,7 @@ jobs:
             }
 
             const mo = new MutationObserver(scan);
-            function enable(){ scan(); mo.observe(document.documentElement,{childList:true,subtree:true}); window.gsResetTest=(email)=>sendReset(email); }
+            function enable(){ maybeAskForNewPin(); scan(); mo.observe(document.documentElement,{childList:true,subtree:true}); window.gsResetTest=(email)=>sendReset(email); }
           })();
           EOF
 
@@ -306,14 +346,13 @@ jobs:
             fi
           fi
 
-      # 5.2) Pagina /reset (validate/consume via JSONP)
+      # 5.2) Pagina /reset (validate/consume via JSONP) + flag per l’app
       - name: Add /reset page (Google Apps Script JSONP)
         working-directory: source
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist/reset
-
           cat > dist/reset/index.html << 'HTML'
           <!doctype html><html lang="it"><head>
             <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -381,9 +420,12 @@ jobs:
                 showValid();
                 document.getElementById('go').onclick=function(){
                   consumeWith(paramUsed||'t', t, function(okRes){
+                    if(okRes){
+                      try{ localStorage.setItem('gs_pin_reset_ready','1'); }catch(e){}
+                    }
                     msg.style.display='block'; ok.style.display='none';
                     msg.textContent = okRes
-                      ? 'Reset confermato. Ora riapri l’app e imposta un nuovo PIN.'
+                      ? 'Reset confermato. Ora torna all’app e imposta un nuovo PIN.'
                       : 'Qualcosa è andato storto. Riprova.';
                   });
                 };
@@ -392,7 +434,6 @@ jobs:
             </script>
           </body></html>
           HTML
-
           sed -i "s|__RESET_ENDPOINT__|${RESET_ENDPOINT}|g" dist/reset/index.html
 
       # 6) Deploy su gh-pages della repo "gestore"
