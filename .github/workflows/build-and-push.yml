@@ -98,7 +98,7 @@ jobs:
           # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) ✅ Banner update + fallback versione + Email reset shim
+      # 5.1) ✅ Banner update (legato al COMMIT) + fallback versione + Email reset shim
       - name: Ensure PWA update prompt & controlled SW
         working-directory: source
         shell: bash
@@ -135,10 +135,12 @@ jobs:
           console.log('SW ok, length:', s.length);
           JS
 
-          # --- Fallback a versione: crea version.json (così mostriamo il banner anche senza waiting)
-          node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ run: ${RUN}, builtAt: new Date().toISOString() }, null, 2))"
+          # --- VERSIONING STABILE: usa l'hash del commit sorgente (cambia solo quando cambia il codice)
+          SOURCE_SHA=$(git rev-parse --short HEAD || echo "nosha")
+          node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ tag: process.env.SHA, builtAt: new Date().toISOString() }, null, 2))" \
+            SHA="$SOURCE_SHA"
 
-          # Genera pwa-update.js (mostra banner se c'è waiting O se version.json indica build nuova)
+          # Genera pwa-update.js (mostra banner se c'è waiting O se 'tag' cambia)
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -149,7 +151,7 @@ jobs:
             var PERIOD_MS = 15 * 60 * 1000; // 15 minuti
             var FIRST_START_DELAY = 2000;    // 2s dopo l'avvio
             var VERSION_URL = scopeGuess + 'version.json?ts=' + Date.now();
-            var LAST_SEEN_KEY = 'pwa-last-version-run';
+            var LAST_SEEN_KEY = 'pwa-last-version-tag';
 
             function banner(onAccept,onDismiss){
               if (document.getElementById('pwa-update-banner')) return;
@@ -191,14 +193,14 @@ jobs:
                 });
               });
 
-              // Fallback a versione: se build nuova ma niente waiting → proponi reload gentile
+              // Fallback a versione: se build nuova (tag diverso) ma niente waiting → proponi reload gentile
               function checkVersion(){
                 fetch(VERSION_URL, { cache: 'no-store' })
                   .then(r=>r.json())
                   .then(v=>{
-                    var last = 0; try { last = parseInt(localStorage.getItem(LAST_SEEN_KEY)||'0',10); } catch(e){}
-                    var cur = parseInt(v && v.run || 0,10);
-                    if (cur && cur > last) {
+                    var last = ''; try { last = localStorage.getItem(LAST_SEEN_KEY)||''; } catch(e){}
+                    var cur = (v && v.tag) || '';
+                    if (cur && cur !== last) {
                       if (!reg.waiting) {
                         banner(function(){
                           try { localStorage.setItem(LAST_SEEN_KEY, String(cur)); } catch(e){}
@@ -241,7 +243,6 @@ jobs:
           # --- Email Reset Shim: crea file e inserisci in index.html con cache-busting ---
           node - <<'JS'
           const fs = require('fs');
-          const ENDPOINT = process.env.RESET_ENDPOINT || '';
           const code = `(() => {
             const API = ${JSON.stringify(process.env.RESET_ENDPOINT || '')} || '';
             function getScope(){
@@ -285,6 +286,7 @@ jobs:
             }
             scan();
             new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
+            window.gsResetTest=function(email){ if(!email) return alert('Nessuna email'); sendReset(email); };
           })();`;
           fs.writeFileSync('dist/email-reset-shim.js', code);
           JS
