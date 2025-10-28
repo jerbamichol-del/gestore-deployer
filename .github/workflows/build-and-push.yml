@@ -3,7 +3,7 @@ name: Build and push to gestore/gh-pages
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"  # ogni 10 minuti cerca aggiornamenti
+    - cron: "*/10 * * * *" # ogni 10 minuti cerca aggiornamenti
 
 permissions:
   contents: write
@@ -20,7 +20,7 @@ jobs:
           ref: main
           path: source
 
-      # 1.1) SHA del commit sorgente (per banner update affidabile)
+      # 1.1) SHA del commit sorgente (versioning stabile per il banner)
       - name: Read source commit SHA
         id: srcsha
         working-directory: source
@@ -61,7 +61,7 @@ jobs:
           EOF
           npx vite build -c vite.pages.config.mjs
 
-      # 5) Copia manifest/icone, reset/, patch per /gestore/ + SPA fallback
+      # 5) Patch PWA (manifest, icone, copia reset/, 404 SPA)
       - name: Patch PWA assets
         working-directory: source
         shell: bash
@@ -83,7 +83,7 @@ jobs:
           if (Array.isArray(m.icons)) {
             m.icons=m.icons.map(ic=>{
               if(ic && ic.src){
-                const clean = String(ic.src).replace(/^(\.?\/)+/,'').replace(/^\//,'');
+                const clean = String(ic.src).replace(/^(\\.?\\/)+/,'').replace(/^\\//,'');
                 ic.src = '/gestore/' + clean;
               }
               return ic;
@@ -96,15 +96,15 @@ jobs:
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
 
-          # Versiona i riferimenti con l'hash del commit (evita falsi banner)
+          # Versiona i riferimenti con l'hash del commit (cache-busting)
           sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${BUILD_TAG}\" />#" dist/index.html || true
           sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${BUILD_TAG}', { scope: '/gestore/' })#" dist/index.html || true
 
           # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) SW controllato + pwa-update (solo se cambia commit) + shim reset NO modali
-      - name: Ensure PWA update & reset mail shim
+      # 5.1) SW pulito + pwa-update (niente falsi banner) + SHIM reset mail + Bridge new-PIN
+      - name: Ensure PWA update prompt, email reset shim & PIN bridge
         working-directory: source
         shell: bash
         env:
@@ -114,14 +114,18 @@ jobs:
           set -e
           mkdir -p dist
 
-          # --- Service worker pulito ---
+          # --- SW dal sorgente (o placeholder)
           if [ -f service-worker.js ]; then
             cp -fv service-worker.js dist/service-worker.js
           elif [ ! -f dist/service-worker.js ]; then
             echo "// placeholder SW" > dist/service-worker.js
           fi
+
+          # --- Rimuovi skipWaiting automatici
           sed -i -E 's/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g' dist/service-worker.js || true
           sed -i -E 's/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g' dist/service-worker.js || true
+
+          # --- Listener SKIP_WAITING canonico (uno solo)
           node - <<'JS'
           const fs = require('fs');
           const p = 'dist/service-worker.js';
@@ -131,12 +135,13 @@ jobs:
             s += "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n";
           }
           fs.writeFileSync(p, s);
+          console.log('SW ok, length:', s.length);
           JS
 
-          # --- version.json con commit stabile ---
+          # --- version.json con commit stabile (mostra banner solo quando cambia)
           node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
 
-          # --- pwa-update: banner SOLO se cambia commit ---
+          # --- pwa-update.js
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -151,8 +156,8 @@ jobs:
               if (document.getElementById('pwa-update-banner')) return;
               var w=document.createElement('div');
               w.id='pwa-update-banner';
-              w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border bg-white shadow-xl p-4 flex items-start gap-3';
-              w.innerHTML='<div class="flex-1"><h3 class="font-semibold">Aggiornamento disponibile</h3><p class="text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-200">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
+              w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border border-slate-200 bg-white shadow-xl p-4 flex items-start gap-3';
+              w.innerHTML='<div class="flex-1"><h3 class="text-slate-900 font-semibold">Aggiornamento disponibile</h3><p class="text-slate-600 text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-200 text-slate-800">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
               document.body.appendChild(w);
               document.getElementById('pwa-update-later').onclick=function(){ w.remove(); onDismiss&&onDismiss(); };
               document.getElementById('pwa-update-now').onclick=function(){ w.remove(); try { sessionStorage.setItem(FLAG,'1'); } catch(e){} onAccept&&onAccept(); };
@@ -161,17 +166,33 @@ jobs:
               try { if (sessionStorage.getItem(FLAG) === '1') { sessionStorage.removeItem(FLAG); location.reload(); } } catch(e){}
             });
             function wire(reg){
-              function showIfWaiting(){ if(reg.waiting && navigator.serviceWorker.controller){ banner(function(){ reg.waiting && reg.waiting.postMessage({type:'SKIP_WAITING'}); }, function(){}); } }
+              function showIfWaiting(){
+                if(reg.waiting && navigator.serviceWorker.controller){
+                  banner(function(){ reg.waiting && reg.waiting.postMessage({type:'SKIP_WAITING'}); }, function(){});
+                }
+              }
               showIfWaiting();
-              reg.addEventListener('updatefound', function(){ var nw = reg.installing; nw && nw.addEventListener('statechange', function(){ if(nw.state==='installed' && navigator.serviceWorker.controller){ showIfWaiting(); } }); });
+              reg.addEventListener('updatefound', function(){
+                var nw = reg.installing;
+                nw && nw.addEventListener('statechange', function(){
+                  if(nw.state==='installed' && navigator.serviceWorker.controller){ showIfWaiting(); }
+                });
+              });
               function checkVersion(){
-                fetch(VERSION_URL, { cache: 'no-store' }).then(r=>r.json()).then(v=>{
-                  var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
-                  var cur = (v && v.commit) || '';
-                  if (cur && cur !== last) {
-                    if (!reg.waiting) banner(function(){ try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){} location.reload(); }, function(){});
-                  }
-                }).catch(function(){});
+                fetch(VERSION_URL, { cache: 'no-store' })
+                  .then(r=>r.json())
+                  .then(v=>{
+                    var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
+                    var cur = (v && v.commit) || '';
+                    if (cur && cur !== last) {
+                      if (!reg.waiting) {
+                        banner(function(){
+                          try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){}
+                          location.reload();
+                        }, function(){});
+                      }
+                    }
+                  }).catch(function(){});
               }
               var check = function(){ reg.update().catch(function(){}); checkVersion(); };
               setTimeout(check, FIRST_START_DELAY);
@@ -180,7 +201,10 @@ jobs:
               setInterval(check, PERIOD_MS);
             }
             window.addEventListener('load', function(){
-              (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) ).then(function(reg){ return reg || navigator.serviceWorker.getRegistration(); }).then(function(reg){ reg && wire(reg); }).catch(function(){});
+              (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) )
+                .then(function(reg){ return reg || navigator.serviceWorker.getRegistration(); })
+                .then(function(reg){ reg && wire(reg); })
+                .catch(function(){});
             });
           })();`;
           fs.writeFileSync('dist/pwa-update.js', code);
@@ -195,74 +219,79 @@ jobs:
             fi
           fi
 
-          # --- Email Reset Shim (nessun modale/alert, nessun trigger automatico) ---
+          # --- Email Reset SHIM (niente modali/alert; prende email dall'input vicino al bottone)
           node - <<'JS'
           const fs = require('fs');
-          const api = process.env.RESET_ENDPOINT || '';
-          const code = `(()=>{
-            if (location.pathname.includes('/reset/')) return;
-            const API = ${JSON.stringify(api)};
+          const code = `(function(){
+            if (location.pathname.includes('/reset/')) return; // non agire nella pagina reset
+            const API = ${JSON.stringify(process.env.RESET_ENDPOINT || '')};
             if (!API) return;
 
-            let armed=false, inFlight=false, lastSent=0;
-            const arm=()=>{ armed=true; window.removeEventListener('pointerdown',arm,true); window.removeEventListener('keydown',arm,true); };
+            // si attiva solo dopo una vera interazione dell'utente
+            let armed=false;
+            const arm=()=>{ armed=true; enable(); window.removeEventListener('pointerdown',arm,true); window.removeEventListener('keydown',arm,true); };
             window.addEventListener('pointerdown',arm,true);
             window.addEventListener('keydown',arm,true);
+
+            let inFlight=false, lastSent=0;
 
             function getScope(){
               const l=document.querySelector('link[rel="manifest"]');
               if(l&&l.getAttribute('href')){
-                try{ const u=new URL(l.getAttribute('href'),location.href); const m=u.pathname.match(/^\\/([^/]+)\\//); if(m) return '/'+m[1]+'/'; }catch(e){}
+                try{ const u=new URL(l.getAttribute('href'),location.href);
+                  const m=u.pathname.match(/^\\/([^/]+)\\//); if(m) return '/'+m[1]+'/';
+                }catch(e){}
               }
               return '/gestore/';
             }
             const SCOPE=getScope();
             const REDIRECT=location.origin+SCOPE+'reset/';
 
-            function send(email){
-              if(!armed || !email || !API) return;
-              const now=Date.now(); if(inFlight || (now-lastSent)<6000) return; // debounce 6s
+            function readEmailNear(el){
+              // cerca un input di tipo email/testo nel raggio del form/pannello
+              let root=el.closest('form') || el.closest('div') || document;
+              let inp = root.querySelector('input[type="email"], input[type="text"]');
+              let v = inp && (inp.value||'').trim();
+              return v || null;
+            }
+
+            function sendReset(email){
+              if (!armed) return;
+              if (!email || !API) return;
+              const now=Date.now();
+              if (inFlight || (now-lastSent)<5000) return; // debounce 5s
               inFlight=true; lastSent=now;
               const url=API+'?action=request&email='+encodeURIComponent(email)+'&redirect='+encodeURIComponent(REDIRECT);
               try{ fetch(url,{method:'GET',cache:'no-store',mode:'no-cors'}) }catch(e){}
+              const img=new Image(); img.src=url+'&_b=1';
               setTimeout(()=>{ inFlight=false; },1200);
-              try{ localStorage.setItem('gs_last_reset_request', String(Date.now())); }catch(e){}
-              // niente alert/modale
-            }
-
-            function pickEmail(){
-              try{ const v=localStorage.getItem('gs_email'); if(v) return v; }catch(e){}
-              // se l'app ha già messo l'email nell'input, la riuso
-              const inp=[...document.querySelectorAll('input[type="email"],input[autocomplete="email"]')].find(i=>i.value && i.value.includes('@'));
-              return inp ? inp.value : null;
-            }
-
-            function matchResetButton(el){
-              if(!el) return false;
-              const t=(el.textContent||'').toLowerCase();
-              if(t.includes('invia') && t.includes('reset') && (t.includes('link')||t.includes('pin'))) return true;
-              if(el.hasAttribute('data-reset-mail')) return true;
-              return false;
+              // nessun alert: non bloccare il passaggio alla schermata successiva
             }
 
             function attach(el){
-              if(!el || el.__gs_bound) return; el.__gs_bound=true;
-              el.addEventListener('click', (ev)=>{
-                if(!armed || !ev.isTrusted) return;
-                try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){}
-                const email = pickEmail();
-                send(email);
-              }, {capture:true});
+              if(!el||el.__gs_bound) return; el.__gs_bound=true;
+              el.addEventListener('click',(ev)=>{
+                if (!armed || !ev.isTrusted) return;
+                try{ev.preventDefault();ev.stopPropagation();}catch(e){}
+                const email = readEmailNear(el) || (localStorage.getItem('gs_email')||'');
+                if (email) { try{ localStorage.setItem('gs_email', email); }catch(e){} sendReset(email); }
+              },{capture:true});
             }
 
             function scan(){
-              document.querySelectorAll('button, a, [role="button"], [data-reset-mail]').forEach(btn=>{
-                if(matchResetButton(btn)) attach(btn);
+              // bottone con testo “Invia Link di Reset” o custom data-attr
+              document.querySelectorAll('[data-reset-mail]').forEach(attach);
+              [...document.querySelectorAll('button, a, [role="button"]')].forEach(el=>{
+                const t=(el.textContent||'').toLowerCase();
+                if (t.includes('invia') && t.includes('reset') && (t.includes('link')||t.includes('pin'))) attach(el);
               });
             }
-            scan();
-            new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
-            window.gsResetTest=(e)=>send(e); // helper opzionale
+
+            function enable(){
+              scan();
+              new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
+              window.gsResetTest = (email)=> sendReset(email); // helper
+            }
           })();`;
           fs.writeFileSync('dist/email-reset-shim.js', code);
           JS
@@ -276,22 +305,61 @@ jobs:
             fi
           fi
 
-          # --- Bridge all'avvio: se rientri da /reset, nasconde "Controlla la tua email" ---
+          # --- PIN BRIDGE: porta alla schermata “Crea un nuovo PIN”
           node - <<'JS'
           const fs = require('fs');
           const code = `(()=> {
+            function isNewPinScreen(){
+              const headers=[...document.querySelectorAll('h1,h2,h3')].map(n=>(n.textContent||'').trim().toLowerCase());
+              if (headers.some(t=>t.includes('crea un nuovo pin'))) return true;
+              const keys=[...document.querySelectorAll('button')].map(b=>(b.textContent||'').trim());
+              const hasKeypad=['0','1','2','3','4','5','6','7','8','9'].every(x=>keys.includes(x));
+              return hasKeypad && headers.join(' ').includes('pin');
+            }
+            function clickCandidates(){
+              const btns=[...document.querySelectorAll('button,a,[role=\"button\"]')];
+              const c = btns.find(b=>{
+                const t=(b.textContent||'').toLowerCase();
+                return t.includes('pin') && (t.includes('crea')||t.includes('nuovo')||t.includes('imposta')||t.includes('reimposta'));
+              });
+              if (c) c.click();
+            }
+            function tryRoutes(){
+              const base = location.origin + '/gestore/';
+              const guesses = [
+                '#/new-pin','#/pin/new','#/set-pin','#/reset-pin','#/pin',
+                '/pin/new','/set-pin','/reset-pin','/auth/pin','/pin'
+              ];
+              let i=0;
+              const tick=()=>{
+                if (isNewPinScreen()) { return; }
+                if (i>=guesses.length) { clickCandidates(); return; }
+                const r=guesses[i++];
+                if (r.startsWith('#')) {
+                  if (location.pathname !== '/gestore/') history.replaceState(null,'',base);
+                  location.hash=r;
+                  window.dispatchEvent(new HashChangeEvent('hashchange'));
+                } else {
+                  history.pushState(null,'', base.replace(/\/$/,'') + r);
+                  window.dispatchEvent(new PopStateEvent('popstate'));
+                }
+                setTimeout(tick, 500);
+              };
+              tick();
+            }
             function hideEmailScreen(){
-              const nodes=[...document.querySelectorAll('*')];
-              nodes.forEach(n=>{
+              [...document.querySelectorAll('*')].forEach(n=>{
                 const t=(n.textContent||'').toLowerCase();
-                if(t.includes('controlla la tua email')){ n.style.display='none'; }
+                if (t.includes('controlla la tua email')) n.style.display='none';
               });
             }
             function run(){
-              try{
-                const flag = localStorage.getItem('gs_force_new_pin');
-                if(flag==='1'){ hideEmailScreen(); }
-              }catch(e){}
+              let flag=false;
+              try { flag = localStorage.getItem('gs_force_new_pin')==='1'; } catch(e){}
+              const urlFlag = new URL(location.href).searchParams.get('resetpin')==='1';
+              if (!(flag || urlFlag)) return;
+              hideEmailScreen();
+              if (!isNewPinScreen()) tryRoutes();
             }
             run();
             new MutationObserver(run).observe(document.documentElement,{childList:true,subtree:true});
@@ -299,7 +367,7 @@ jobs:
           fs.writeFileSync('dist/pin-bridge.js', code);
           JS
 
-          # Iniezione del bridge (cache-busting = BUILD_TAG)
+          # Inietta il bridge (cache-busting = BUILD_TAG)
           if [ -f dist/index.html ]; then
             if grep -q "pin-bridge.js" dist/index.html; then
               sed -i -E "s#pin-bridge\.js(\?v=[^\"']+)?#pin-bridge.js?v=${BUILD_TAG}#g" dist/index.html
@@ -308,11 +376,12 @@ jobs:
             fi
           fi
 
-          # Log utili
-          tail -n 30 dist/service-worker.js || true
+          echo '--- SW (tail) ---'
+          tail -n 30 dist/service-worker.js
+          echo '--- version.json ---'
           cat dist/version.json || true
 
-      # 5.2) Pagina /reset (validate/consume via JSONP) — set flag e torna all'app
+      # 5.2) Pagina /reset: valida/consuma e reindirizza alla schermata PIN
       - name: Add /reset page (Google Apps Script JSONP)
         working-directory: source
         shell: bash
@@ -326,16 +395,16 @@ jobs:
           const html = `<!doctype html><html lang="it"><head>
           <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
           <title>Reimposta PIN</title>
-          <style>body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial} .box{max-width:480px;margin:12vh auto;background:#fff;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.08);padding:24px}</style>
+          <script src="https://cdn.tailwindcss.com"></script>
           </head>
-          <body style="background:#f1f5f9;padding:16px">
-            <main class="box">
-              <h1 style="font-size:20px;margin:0 0 12px">Reimposta PIN</h1>
-              <div id="msg">Verifica del link…</div>
-              <div id="ok" style="display:none;margin-top:10px">
-                <p>Il link è valido. Premi “Conferma” per procedere al reset.</p>
-                <button id="go" style="padding:10px 12px;border-radius:10px;background:#4f46e5;color:#fff;border:0">Conferma reset</button>
-                <p style="font-size:12px;color:#475569;margin-top:10px">Dopo la conferma, torna nell’app <b>Gestore Spese</b> e imposta un nuovo PIN.</p>
+          <body class="min-h-screen flex items-center justify-center bg-slate-100 p-4">
+            <main class="w-full max-w-md bg-white shadow-xl rounded-2xl p-6 space-y-4">
+              <h1 class="text-xl font-semibold text-slate-900">Reimposta PIN</h1>
+              <div id="msg" class="text-slate-700">Verifica del link…</div>
+              <div id="ok" class="space-y-3" style="display:none">
+                <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset.</p>
+                <button id="go" class="w-full rounded-lg py-2 bg-indigo-600 text-white">Conferma reset</button>
+                <p class="text-xs text-slate-500">Dopo la conferma, si aprirà la schermata per creare il nuovo PIN.</p>
               </div>
             </main>
             <script>
@@ -353,23 +422,45 @@ jobs:
                 };
                 document.head.appendChild(s);
               }
-              var t = new URL(location.href).searchParams.get('t') || new URL(location.href).searchParams.get('token');
+              function pickToken(){
+                var sp=new URL(location.href).searchParams;
+                var keys=['t','token','code','k'];
+                for(var i=0;i<keys.length;i++){ var v=sp.get(keys[i]); if(v) return v; }
+                for (const [k,v] of sp.entries()){ if(String(v).length>12) return v; }
+                return null;
+              }
+              function validateAny(t, cb){
+                var tried=0, done=false;
+                function tryOne(param){
+                  tried++;
+                  jsonp(ENDPOINT+'?action=validate&'+param+'='+encodeURIComponent(t), function(res){
+                    if(done) return;
+                    if(res && res.ok){ done=true; cb(true, param); }
+                    else if(tried<3){
+                      if(param==='t') tryOne('token'); else if(param==='token') tryOne('code'); else tryOne('t');
+                    } else { cb(false, null); }
+                  });
+                }
+                tryOne('t');
+              }
               var msg = document.getElementById('msg'), ok = document.getElementById('ok');
               function showInvalid(){ ok.style.display='none'; msg.style.display='block'; msg.textContent='Link non valido o scaduto.'; }
               function showValid(){ msg.style.display='none'; ok.style.display='block'; }
-              if(!ENDPOINT || !t){ showInvalid(); return; }
-              jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
-                if(!(v&&v.ok)){ showInvalid(); return; }
+              if(!ENDPOINT){ showInvalid(); return; }
+              var t = pickToken();
+              if(!t){ showInvalid(); return; }
+              validateAny(t, function(valid, paramUsed){
+                if(!valid){ showInvalid(); return; }
                 showValid();
                 document.getElementById('go').onclick=function(){
-                  jsonp(ENDPOINT+'?action=consume&t='+encodeURIComponent(t), function(c){
-                    if(c&&c.ok){
+                  jsonp(ENDPOINT+'?action=consume&'+(paramUsed||'t')+'='+encodeURIComponent(t), function(c){
+                    if(c && c.ok){
                       try{ localStorage.setItem('gs_force_new_pin','1'); }catch(e){}
-                      // torna all'app
                       var base = location.origin + '/gestore/';
-                      location.href = base;
+                      location.replace(base + '?resetpin=1#new-pin');
                     }else{
-                      showInvalid();
+                      msg.style.display='block'; ok.style.display='none';
+                      msg.textContent = 'Qualcosa è andato storto. Riprova.';
                     }
                   });
                 };
