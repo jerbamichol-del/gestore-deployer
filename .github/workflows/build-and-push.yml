@@ -20,6 +20,12 @@ jobs:
           ref: main
           path: source
 
+      # 1.1) Legge lo SHA del commit sorgente (serve per versioning stabile)
+      - name: Read source commit SHA
+        id: srcsha
+        working-directory: source
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
       # 2) Installa Node e dipendenze
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -59,11 +65,12 @@ jobs:
       - name: Patch PWA assets
         working-directory: source
         shell: bash
+        env:
+          BUILD_TAG: ${{ steps.srcsha.outputs.sha }}
         run: |
           set -e
           mkdir -p dist
           [ -f manifest.json ] && cp -v manifest.json dist/ || true
-          # (service-worker.js lo gestiamo nello step successivo)
           for f in icon-192.svg icon-512.svg; do [ -f "$f" ] && cp -v "$f" dist/ || true; done
           [ -d icons ] && cp -rv icons dist/ || true
           # copia eventuale pagina di reset (se presente nella repo)
@@ -90,24 +97,23 @@ jobs:
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
 
-          RUN=${{ github.run_number }}
-          # Aggiorna link manifest + SW nell'index della build (se presenti)
-          sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${RUN}\" />#" dist/index.html || true
-          sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${RUN}', { scope: '/gestore/' })#" dist/index.html || true
+          # Patch riferimenti con hash commit stabile
+          sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${BUILD_TAG}\" />#" dist/index.html || true
+          sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${BUILD_TAG}', { scope: '/gestore/' })#" dist/index.html || true
 
           # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) ✅ Banner update (legato al COMMIT) + fallback versione + Email reset shim
+      # 5.1) ✅ Banner update + fallback versione + Email reset shim
       - name: Ensure PWA update prompt & controlled SW
         working-directory: source
         shell: bash
         env:
+          BUILD_TAG: ${{ steps.srcsha.outputs.sha }}
           RESET_ENDPOINT: "https://script.google.com/macros/s/AKfycbzmq-PTrMcMdrYqCRX29_S034zCaj5ttyc3tZhdhjV77wF6n99LKricFgzy7taGqKOo/exec"
         run: |
           set -e
           mkdir -p dist
-          RUN=${{ github.run_number }}
 
           # Usa SEMPRE il SW pulito dal sorgente se presente; altrimenti placeholder
           if [ -f service-worker.js ]; then
@@ -135,12 +141,10 @@ jobs:
           console.log('SW ok, length:', s.length);
           JS
 
-          # --- VERSIONING STABILE: usa l'hash del commit sorgente (cambia solo quando cambia il codice)
-          SOURCE_SHA=$(git rev-parse --short HEAD || echo "nosha")
-          node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ tag: process.env.SHA, builtAt: new Date().toISOString() }, null, 2))" \
-            SHA="$SOURCE_SHA"
+          # --- version.json stabile con hash commit
+          node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
 
-          # Genera pwa-update.js (mostra banner se c'è waiting O se 'tag' cambia)
+          # Genera pwa-update.js (usa commit stabile, niente banner se non cambia)
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -151,7 +155,7 @@ jobs:
             var PERIOD_MS = 15 * 60 * 1000; // 15 minuti
             var FIRST_START_DELAY = 2000;    // 2s dopo l'avvio
             var VERSION_URL = scopeGuess + 'version.json?ts=' + Date.now();
-            var LAST_SEEN_KEY = 'pwa-last-version-tag';
+            var LAST_KEY = 'pwa-last-commit';
 
             function banner(onAccept,onDismiss){
               if (document.getElementById('pwa-update-banner')) return;
@@ -168,7 +172,6 @@ jobs:
               };
             }
 
-            // Ricarica SOLO se l'utente ha accettato
             navigator.serviceWorker.addEventListener('controllerchange', function(){
               try {
                 if (sessionStorage.getItem(FLAG) === '1') {
@@ -179,7 +182,6 @@ jobs:
             });
 
             function wire(reg){
-              // Percorso standard: mostra banner se c'è un SW in waiting
               function showIfWaiting(){
                 if(reg.waiting && navigator.serviceWorker.controller){
                   banner(function(){ reg.waiting && reg.waiting.postMessage({type:'SKIP_WAITING'}); }, function(){});
@@ -193,17 +195,16 @@ jobs:
                 });
               });
 
-              // Fallback a versione: se build nuova (tag diverso) ma niente waiting → proponi reload gentile
               function checkVersion(){
                 fetch(VERSION_URL, { cache: 'no-store' })
                   .then(r=>r.json())
                   .then(v=>{
-                    var last = ''; try { last = localStorage.getItem(LAST_SEEN_KEY)||''; } catch(e){}
-                    var cur = (v && v.tag) || '';
+                    var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
+                    var cur = (v && v.commit) || '';
                     if (cur && cur !== last) {
                       if (!reg.waiting) {
                         banner(function(){
-                          try { localStorage.setItem(LAST_SEEN_KEY, String(cur)); } catch(e){}
+                          try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){}
                           location.reload();
                         }, function(){});
                       }
@@ -231,18 +232,19 @@ jobs:
           fs.writeFileSync('dist/pwa-update.js', code);
           JS
 
-          # Inietta pwa-update.js con cache-busting RUN
+          # Inietta pwa-update.js con cache-busting = BUILD_TAG
           if [ -f dist/index.html ]; then
             if grep -q "pwa-update.js" dist/index.html; then
-              sed -i -E "s#pwa-update\.js(\?v=[0-9]+)?#pwa-update.js?v=${RUN}#g" dist/index.html
+              sed -i -E "s#pwa-update\.js(\?v=[^\"']+)?#pwa-update.js?v=${BUILD_TAG}#g" dist/index.html
             else
-              sed -i "s#</body>#  <script type=\"module\" src=\"./pwa-update.js?v=${RUN}\"></script>\n</body>#" dist/index.html
+              sed -i "s#</body>#  <script type=\"module\" src=\"./pwa-update.js?v=${BUILD_TAG}\"></script>\n</body>#" dist/index.html
             fi
           fi
 
           # --- Email Reset Shim: crea file e inserisci in index.html con cache-busting ---
           node - <<'JS'
           const fs = require('fs');
+          const API = process.env.RESET_ENDPOINT || '';
           const code = `(() => {
             const API = ${JSON.stringify(process.env.RESET_ENDPOINT || '')} || '';
             function getScope(){
@@ -260,9 +262,10 @@ jobs:
             function sendReset(email){
               if(!email || !API) return;
               const url=API+'?action=request&email='+encodeURIComponent(email)+'&redirect='+encodeURIComponent(REDIRECT);
-              fetch(url,{method:'GET',cache:'no-store',mode:'no-cors'})
-                .then(()=>alert('Se esiste un account con questa email, riceverai un link di reset.'))
-                .catch(()=>alert('Richiesta inviata. Controlla la posta.'));
+              // doppio canale per robustezza
+              try{ fetch(url,{method:'GET',cache:'no-store',mode:'no-cors'}) }catch(e){}
+              const img=new Image(); img.src=url+'&_b=1';
+              alert('Se esiste un account con questa email, riceverai un link di reset.');
             }
             function pickEmail(){
               try{const s=localStorage.getItem('gs_email'); if(s) return s;}catch(e){}
@@ -272,11 +275,7 @@ jobs:
             }
             function attach(el){
               if(!el||el.__gs_bound) return; el.__gs_bound=true;
-              el.addEventListener('click',(ev)=>{
-                try{ev.preventDefault();ev.stopPropagation();}catch(e){}
-                const email=pickEmail();
-                if(email) sendReset(email);
-              },{capture:true});
+              el.addEventListener('click',(ev)=>{ try{ev.preventDefault();ev.stopPropagation();}catch(e){} const email=pickEmail(); if(email) sendReset(email); },{capture:true});
             }
             function scan(){
               document.querySelectorAll('[data-reset-mail]').forEach(attach);
@@ -286,17 +285,18 @@ jobs:
             }
             scan();
             new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});
-            window.gsResetTest=function(email){ if(!email) return alert('Nessuna email'); sendReset(email); };
+            // helper per test manuale
+            window.gsResetTest = (email)=>sendReset(email);
           })();`;
           fs.writeFileSync('dist/email-reset-shim.js', code);
           JS
 
-          # Inietta lo shim in index.html (versionato con RUN per evitare cache)
+          # Inietta lo shim (cache-busting = BUILD_TAG)
           if [ -f dist/index.html ]; then
             if grep -q "email-reset-shim.js" dist/index.html; then
-              sed -i -E "s#email-reset-shim\.js(\?v=[0-9]+)?#email-reset-shim.js?v=${RUN}#g" dist/index.html
+              sed -i -E "s#email-reset-shim\.js(\?v=[^\"']+)?#email-reset-shim.js?v=${BUILD_TAG}#g" dist/index.html
             else
-              sed -i "s#</body>#  <script type=\"module\" src=\"./email-reset-shim.js?v=${RUN}\"></script>\n</body>#" dist/index.html
+              sed -i "s#</body>#  <script type=\"module\" src=\"./email-reset-shim.js?v=${BUILD_TAG}\"></script>\n</body>#" dist/index.html
             fi
           fi
 
@@ -305,7 +305,7 @@ jobs:
           echo '--- version.json ---'
           cat dist/version.json || true
 
-      # 5.2) 🔐 Pagina /reset (validate/consume via JSONP) con Apps Script
+      # 5.2) 🔐 Pagina /reset (validate/consume via JSONP) robusta con Apps Script
       - name: Add /reset page (Google Apps Script JSONP)
         working-directory: source
         shell: bash
@@ -346,19 +346,49 @@ jobs:
                 };
                 document.head.appendChild(s);
               }
-              var params = new URL(location.href).searchParams;
-              var t = params.get('t') || params.get('token');
+              function pickToken(){
+                var sp=new URL(location.href).searchParams;
+                var keys=['t','token','code','k'];
+                for(var i=0;i<keys.length;i++){ var v=sp.get(keys[i]); if(v) return v; }
+                // fallback: primo parametro con valore "lungo"
+                for (const [k,v] of sp.entries()){ if(String(v).length>12) return v; }
+                return null;
+              }
+              function validateAny(t, cb){
+                var tried=0, done=false;
+                function tryOne(param){
+                  tried++;
+                  jsonp(ENDPOINT+'?action=validate&'+param+'='+encodeURIComponent(t), function(res){
+                    if(done) return;
+                    if(res && res.ok){ done=true; cb(true, param); }
+                    else if(tried<3){ // prova altre chiavi comuni
+                      if(param==='t') tryOne('token'); else if(param==='token') tryOne('code'); else tryOne('t');
+                    } else { cb(false, null); }
+                  });
+                }
+                tryOne('t');
+              }
+              function consumeWith(param, t, cb){
+                jsonp(ENDPOINT+'?action=consume&'+param+'='+encodeURIComponent(t), function(res){
+                  cb(!!(res&&res.ok));
+                });
+              }
+
               var msg = document.getElementById('msg'), ok = document.getElementById('ok');
               function showInvalid(){ ok.style.display='none'; msg.style.display='block'; msg.textContent='Link non valido o scaduto.'; }
               function showValid(){ msg.style.display='none'; ok.style.display='block'; }
-              if(!t || !ENDPOINT){ showInvalid(); return; }
-              jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
-                if(!(v&&v.ok)){ showInvalid(); return; }
+
+              if(!ENDPOINT){ showInvalid(); return; }
+              var t = pickToken();
+              if(!t){ showInvalid(); return; }
+
+              validateAny(t, function(valid, paramUsed){
+                if(!valid){ showInvalid(); return; }
                 showValid();
                 document.getElementById('go').onclick=function(){
-                  jsonp(ENDPOINT+'?action=consume&t='+encodeURIComponent(t), function(c){
+                  consumeWith(paramUsed||'t', t, function(okRes){
                     msg.style.display='block'; ok.style.display='none';
-                    msg.textContent = (c&&c.ok)
+                    msg.textContent = okRes
                       ? 'Reset confermato. Ora riapri l’app e imposta un nuovo PIN.'
                       : 'Qualcosa è andato storto. Riprova.';
                   });
