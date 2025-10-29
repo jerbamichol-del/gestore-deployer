@@ -12,7 +12,6 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     steps:
-      # 1) Sorgente: repo "gestore" (branch main)
       - name: Checkout gestore (source)
         uses: actions/checkout@v4
         with:
@@ -20,13 +19,11 @@ jobs:
           ref: main
           path: source
 
-      # 1.1) Hash del commit sorgente (per version.json e cache-busting)
       - name: Read source commit SHA
         id: srcsha
         working-directory: source
         run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      # 2) Node + deps
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -36,14 +33,12 @@ jobs:
         working-directory: source
         run: npm install
 
-      # 3) Patch typo AI Studio
       - name: Patch AI Studio typos
         working-directory: source
         run: |
           grep -RIl "import React, 'react';" . | xargs -r sed -i "s/import React, 'react';/import React from 'react';/g"
           grep -RIl "import React, from 'react';" . | xargs -r sed -i "s/import React, from 'react';/import React from 'react';/g"
 
-      # 4) Build Vite con base /gestore/
       - name: Build (Vite for Pages)
         working-directory: source
         env:
@@ -61,7 +56,6 @@ jobs:
           EOF
           npx vite build -c vite.pages.config.mjs
 
-      # 5) Patch manifest/icones + fallback SPA
       - name: Patch PWA assets
         working-directory: source
         shell: bash
@@ -95,14 +89,11 @@ jobs:
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
 
-          # cache-busting riferimenti in index.html
           sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${BUILD_TAG}\" />#" dist/index.html || true
           sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${BUILD_TAG}', { scope: '/gestore/' })#" dist/index.html || true
 
-          # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) SW controllato + banner update (solo quando cambia commit) + email reset shim
       - name: Ensure PWA update prompt & controlled SW
         working-directory: source
         shell: bash
@@ -113,18 +104,15 @@ jobs:
           set -e
           mkdir -p dist
 
-          # SW dal sorgente (o placeholder)
           if [ -f service-worker.js ]; then
             cp -fv service-worker.js dist/service-worker.js
           elif [ ! -f dist/service-worker.js ]; then
             echo "// placeholder SW" > dist/service-worker.js
           fi
 
-          # Rimuovi skipWaiting automatici
           sed -i -E 's/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g' dist/service-worker.js || true
           sed -i -E 's/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g' dist/service-worker.js || true
 
-          # Listener standard, uno solo
           node - <<'JS'
           const fs = require('fs');
           const p = 'dist/service-worker.js';
@@ -137,10 +125,8 @@ jobs:
           console.log('SW ok, length:', s.length);
           JS
 
-          # version.json con commit stabile
           node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
 
-          # pwa-update.js (banner solo se cambia commit e se c'è un waiting)
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -209,7 +195,6 @@ jobs:
           fs.writeFileSync('dist/pwa-update.js', code);
           JS
 
-          # Inietta pwa-update.js (cache-busting = BUILD_TAG)
           if [ -f dist/index.html ]; then
             if grep -q "pwa-update.js" dist/index.html; then
               sed -i -E "s#pwa-update\.js(\?v=[^\"']+)?#pwa-update.js?v=${BUILD_TAG}#g" dist/index.html
@@ -218,7 +203,7 @@ jobs:
             fi
           fi
 
-          # Email reset shim: SOLO su click reale, no alert, debounce; espone window.gsResetTest
+          # Email reset shim: click reale + debounce + conferma non-bloccante + evento
           node - <<'JS'
           const fs = require('fs');
           const code = `(() => {
@@ -247,6 +232,18 @@ jobs:
             const SCOPE=getScope();
             const REDIRECT=location.origin+SCOPE+'reset/';
 
+            function toast(msg){
+              try{
+                if (document.getElementById('gs-mini-toast')) return;
+                const d=document.createElement('div');
+                d.id='gs-mini-toast';
+                d.style.cssText='position:fixed;left:50%;bottom:16px;transform:translateX(-50%);background:#111;color:#fff;padding:10px 14px;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.2);font-size:14px;z-index:99999;opacity:.95';
+                d.textContent=msg;
+                document.body.appendChild(d);
+                setTimeout(()=>{ d.remove(); }, 2000);
+              }catch(_){}
+            }
+
             function sendReset(email){
               if (!armed) return;
               if (!email || !API) return;
@@ -255,6 +252,8 @@ jobs:
               inFlight = true; lastSent = now;
               const url=API+'?action=request&email='+encodeURIComponent(email)+'&redirect='+encodeURIComponent(REDIRECT);
               fetch(url,{method:'GET',cache:'no-store',mode:'no-cors'}).catch(()=>{});
+              window.dispatchEvent(new CustomEvent('gs:reset-mail-sent',{detail:{email}}));
+              toast('Se esiste un account, il link è stato inviato.');
               setTimeout(()=>{ inFlight=false; }, 1500);
             }
             function pickEmail(){
@@ -273,8 +272,8 @@ jobs:
                 if(email) sendReset(email);
               },{capture:true});
             }
-            function narrowButtons(){
-              const all=[...document.querySelectorAll('button, [role=\"button\"], a')];
+            function findButtons(){
+              const all=[...document.querySelectorAll('button, [role="button"], a')];
               return all.filter(el=>{
                 const t=(el.textContent||'').trim().toLowerCase();
                 return t.includes('invia') && t.includes('reset') && (t.includes('link') || t.includes('pin'));
@@ -283,7 +282,7 @@ jobs:
             function scan(){
               if (!armed) return;
               document.querySelectorAll('[data-reset-mail]').forEach(attach);
-              narrowButtons().forEach(attach);
+              findButtons().forEach(attach);
             }
             const mo = new MutationObserver(scan);
             function enable(){ scan(); mo.observe(document.documentElement,{childList:true,subtree:true}); window.gsResetTest=(email)=>sendReset(email); }
@@ -299,17 +298,18 @@ jobs:
             fi
           fi
 
-      # 5.2) Pagina /reset: valida e REDIRECT all'app con ?resetToken=&email= (no consume qui)
       - name: Add /reset page (redirect with resetToken&email)
         working-directory: source
         shell: bash
         env:
+          BUILD_TAG: ${{ steps.srcsha.outputs.sha }}
           RESET_ENDPOINT: "https://script.google.com/macros/s/AKfycbzmq-PTrMcMdrYqCRX29_S034zCaj5ttyc3tZhdhjV77wF6n99LKricFgzy7taGqKOo/exec"
         run: |
           set -e
           node - <<'JS'
           const fs = require('fs');
           const ENDPOINT = process.env.RESET_ENDPOINT || '';
+          const BUILD = process.env.BUILD_TAG || '';
           const html = `<!doctype html><html lang="it"><head>
           <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
           <title>Reimposta PIN</title>
@@ -349,16 +349,14 @@ jobs:
               function showValid(){ msg.style.display='none'; ok.style.display='block'; }
               if(!ENDPOINT || !t){ showInvalid(); return; }
 
-              // 1) validate → NON consumare qui
               jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
                 if(!(v&&v.ok)){ showInvalid(); return; }
                 if(!email && v.email){ email = v.email; }
                 showValid();
 
                 document.getElementById('go').onclick=function(){
-                  // 2) redirect all'app con ?resetToken=&email=
                   var SCOPE = getScope();
-                  var appUrl = location.origin + SCOPE + '?resetToken=' + encodeURIComponent(t) + '&email=' + encodeURIComponent(email || '');
+                  var appUrl = location.origin + SCOPE + '?resetToken=' + encodeURIComponent(t) + '&email=' + encodeURIComponent(email || '') + '&v=${BUILD}';
                   location.replace(appUrl);
                 };
               });
@@ -371,7 +369,6 @@ jobs:
           mkdir -p dist/reset
           cp -R reset/* dist/reset/
 
-      # 6) Deploy su gh-pages della repo "gestore"
       - name: Push to gestore/gh-pages
         uses: peaceiris/actions-gh-pages@v3
         with:
