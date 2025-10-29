@@ -3,7 +3,7 @@ name: Build and push to gestore/gh-pages
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *" # ogni 10 minuti cerca aggiornamenti
 
 permissions:
   contents: write
@@ -12,7 +12,7 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     steps:
-      # 1) Sorgente app
+      # 1) Prende il codice dalla tua repo "gestore"
       - name: Checkout gestore (source)
         uses: actions/checkout@v4
         with:
@@ -20,7 +20,7 @@ jobs:
           ref: main
           path: source
 
-      # 1.1) SHA commit sorgente (per versioning stabile del banner)
+      # 1.1) SHA del commit sorgente (per versioning stabile/banner)
       - name: Read source commit SHA
         id: srcsha
         working-directory: source
@@ -36,7 +36,14 @@ jobs:
         working-directory: source
         run: npm install
 
-      # 3) Build Vite per GitHub Pages (base /gestore/)
+      # 3) Patch ai typo comuni di AI Studio (React)
+      - name: Patch AI Studio typos
+        working-directory: source
+        run: |
+          grep -RIl "import React, 'react';" . | xargs -r sed -i "s/import React, 'react';/import React from 'react';/g"
+          grep -RIl "import React, from 'react';" . | xargs -r sed -i "s/import React, from 'react';/import React from 'react';/g"
+
+      # 4) Build Vite per GitHub Pages (base /gestore/)
       - name: Build (Vite for Pages)
         working-directory: source
         env:
@@ -54,7 +61,7 @@ jobs:
           EOF
           npx vite build -c vite.pages.config.mjs
 
-      # 4) Patch PWA (manifest/icons/SPAs)
+      # 5) Patch PWA (manifest, icone, copy reset/, fallback SPA)
       - name: Patch PWA assets
         working-directory: source
         shell: bash
@@ -66,8 +73,9 @@ jobs:
           [ -f manifest.json ] && cp -v manifest.json dist/ || true
           for f in icon-192.svg icon-512.svg; do [ -f "$f" ] && cp -v "$f" dist/ || true; done
           [ -d icons ] && cp -rv icons dist/ || true
+          [ -d reset ] && cp -rv reset dist/ || true
 
-          node - <<'JS'
+          node -e "
           const fs=require('fs'); const p='dist/manifest.json';
           if (!fs.existsSync(p)) process.exit(0);
           const m=JSON.parse(fs.readFileSync(p,'utf8'));
@@ -75,7 +83,7 @@ jobs:
           if (Array.isArray(m.icons)) {
             m.icons=m.icons.map(ic=>{
               if(ic && ic.src){
-                const clean = String(ic.src).replace(/^(\.?\/)+/,'').replace(/^\//,'');
+                const clean = String(ic.src).replace(/^(\\.?\\/)+/,'').replace(/^\\//,'');
                 ic.src = '/gestore/' + clean;
               }
               return ic;
@@ -83,29 +91,30 @@ jobs:
           }
           if (m.share_target && m.share_target.action){
             const a = m.share_target.action || '';
-            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\+?\/?/, '');
+            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\\/+/, '');
           }
           fs.writeFileSync(p, JSON.stringify(m,null,2));
-          JS
+          "
 
-          # Versiona i riferimenti con l'hash del commit
+          # Versiona riferimenti con l'hash del commit
           sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${BUILD_TAG}\" />#" dist/index.html || true
           sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${BUILD_TAG}', { scope: '/gestore/' })#" dist/index.html || true
 
-          # SPA fallback
+          # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5) Service Worker: controllato + bypass /gestore/reset/
-      - name: Ensure controlled SW + update banner (by commit) + reset path bypass
+      # 5.1) SW controllato + pwa-update (no falsi banner) + Email reset shim
+      - name: Ensure PWA update prompt & controlled SW
         working-directory: source
         shell: bash
         env:
           BUILD_TAG: ${{ steps.srcsha.outputs.sha }}
+          RESET_ENDPOINT: "https://script.google.com/macros/s/AKfycbzmq-PTrMcMdrYqCRX29_S034zCaj5ttyc3tZhdhjV77wF6n99LKricFgzy7taGqKOo/exec"
         run: |
           set -e
           mkdir -p dist
 
-          # Copia SW dal sorgente o placeholder
+          # SW dal sorgente (o placeholder)
           if [ -f service-worker.js ]; then
             cp -fv service-worker.js dist/service-worker.js
           elif [ ! -f dist/service-worker.js ]; then
@@ -116,43 +125,23 @@ jobs:
           sed -i -E 's/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g' dist/service-worker.js || true
           sed -i -E 's/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g' dist/service-worker.js || true
 
-          # Patch SW: PREPEND un fetch handler che lascia passare /gestore/reset/
+          # Listener SKIP_WAITING canonico (uno solo)
           node - <<'JS'
           const fs = require('fs');
           const p = 'dist/service-worker.js';
           let s = fs.readFileSync(p, 'utf8');
-
-          const bypass = `
-          // --- Bypass /gestore/reset/ (no SPA fallback) ---
-          self.addEventListener('fetch', function(event){
-            try {
-              const u = new URL(event.request.url);
-              if (event.request.mode === 'navigate' && u.pathname.startsWith('/gestore/reset/')) {
-                if (event.stopImmediatePropagation) event.stopImmediatePropagation();
-                event.respondWith(fetch(event.request, { cache: 'no-store' }));
-              }
-            } catch(e) {}
-          });
-          // -------------------------------------------------
-          `;
-
-          // Prepend per avere priorità
-          s = bypass + '\n' + s;
-
-          // Listener "message" canonico per SKIP_WAITING (uno solo)
           s = s.replace(/self\.addEventListener\(\s*['"]message['"][\s\S]*?\}\s*\)\s*;?/g, '');
           if (!/SKIP_WAITING/.test(s)) {
             s += "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n";
           }
-
           fs.writeFileSync(p, s);
-          console.log('Patched SW length:', s.length);
+          console.log('SW ok, length:', s.length);
           JS
 
-          # version.json: usa commit (evita falsi banner)
+          # version.json con commit stabile (banner solo se cambia)
           node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
 
-          # pwa-update.js: banner solo se cambia il commit
+          # pwa-update: banner solo se cambia il commit
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -163,7 +152,6 @@ jobs:
             var FIRST_START_DELAY = 2000;
             var VERSION_URL = scopeGuess + 'version.json?ts=' + Date.now();
             var LAST_KEY = 'pwa-last-commit';
-
             function banner(onAccept,onDismiss){
               if (document.getElementById('pwa-update-banner')) return;
               var w=document.createElement('div');
@@ -174,11 +162,9 @@ jobs:
               document.getElementById('pwa-update-later').onclick=function(){ w.remove(); onDismiss&&onDismiss(); };
               document.getElementById('pwa-update-now').onclick=function(){ w.remove(); try { sessionStorage.setItem(FLAG,'1'); } catch(e){} onAccept&&onAccept(); };
             }
-
             navigator.serviceWorker.addEventListener('controllerchange', function(){
               try { if (sessionStorage.getItem(FLAG) === '1') { sessionStorage.removeItem(FLAG); location.reload(); } } catch(e){}
             });
-
             function wire(reg){
               function showIfWaiting(){
                 if(reg.waiting && navigator.serviceWorker.controller){
@@ -192,29 +178,28 @@ jobs:
                   if(nw.state==='installed' && navigator.serviceWorker.controller){ showIfWaiting(); }
                 });
               });
-
               function checkVersion(){
                 fetch(VERSION_URL, { cache: 'no-store' })
                   .then(r=>r.json())
                   .then(v=>{
                     var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
                     var cur = (v && v.commit) || '';
-                    if (cur && cur !== last && !reg.waiting) {
-                      banner(function(){
-                        try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){}
-                        location.reload();
-                      }, function(){});
+                    if (cur && cur !== last) {
+                      if (!reg.waiting) {
+                        banner(function(){
+                          try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){}
+                          location.reload();
+                        }, function(){});
+                      }
                     }
                   }).catch(function(){});
               }
-
               var check = function(){ reg.update().catch(function(){}); checkVersion(); };
               setTimeout(check, FIRST_START_DELAY);
               window.addEventListener('focus', check);
               document.addEventListener('visibilitychange', function(){ if(document.visibilityState === 'visible') check(); });
               setInterval(check, PERIOD_MS);
             }
-
             window.addEventListener('load', function(){
               (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) )
                 .then(function(reg){ return reg || navigator.serviceWorker.getRegistration(); })
@@ -234,7 +219,114 @@ jobs:
             fi
           fi
 
-      # 6) Pagina /reset (validate/consume via JSONP) + redirect all'app
+          # --- Email Reset Shim: robusto, NIENTE auto, solo click reali, debounce ---
+          node - <<'JS'
+          const fs = require('fs');
+          const code = `(() => {
+            const API = ${JSON.stringify(process.env.RESET_ENDPOINT || '')};
+            if (!API) return;
+            if (location.pathname.includes('/reset/')) return;
+
+            // attiva solo dopo interazione reale
+            let armed = false;
+            const arm = () => { armed = true; window.removeEventListener('pointerdown', arm, true); window.removeEventListener('keydown', arm, true); };
+            window.addEventListener('pointerdown', arm, true);
+            window.addEventListener('keydown', arm, true);
+
+            let inFlight = false, lastSent = 0;
+
+            function getScope(){
+              const l=document.querySelector('link[rel="manifest"]');
+              if(l&&l.getAttribute('href')){
+                try{
+                  const u=new URL(l.getAttribute('href'),location.href);
+                  const m=u.pathname.match(/^\\/([^/]+)\\//);
+                  if(m) return '/'+m[1]+'/';
+                }catch(e){}
+              }
+              return '/gestore/';
+            }
+            const SCOPE=getScope();
+            const REDIRECT=location.origin+SCOPE+'reset/';
+
+            function sendReset(email){
+              if (!armed) return;
+              if (!email || !API) return;
+              const now = Date.now();
+              if (inFlight || (now - lastSent) < 8000) return; // 8s debounce
+              inFlight = true; lastSent = now;
+
+              // beacon GET (no CORS richiesti)
+              const url = API+'?action=request&email='+encodeURIComponent(email)+'&redirect='+encodeURIComponent(REDIRECT);
+              const img = new Image();
+              img.onload = img.onerror = () => { inFlight = false; };
+              img.src = url + '&_b=1';
+            }
+
+            function pickEmail(){
+              try{const s=localStorage.getItem('gs_email'); if(s) return s;}catch(e){}
+              const email=prompt('Inserisci la tua email per resettare il PIN:');
+              if(email){ try{localStorage.setItem('gs_email', email);}catch(e){} }
+              return email;
+            }
+
+            function isResetText(t){
+              if(!t) return false;
+              const x = t.replace(/\\s+/g,' ').trim().toUpperCase();
+              // match "INVIA", "RESET", "LINK" in modo flessibile
+              return x.includes('INVIA') && x.includes('RESET') && x.includes('LINK');
+            }
+
+            function attach(el){
+              if(!el || el.__gs_bound) return; el.__gs_bound=true;
+              el.addEventListener('click', (ev) => {
+                if (!armed) return;
+                if (!ev.isTrusted) return; // niente click sintetici
+                try{ ev.preventDefault(); ev.stopPropagation(); }catch(e){}
+                const email=pickEmail();
+                if (email) sendReset(email);
+              }, {capture:true});
+            }
+
+            function findCandidates(){
+              const nodes=[...document.querySelectorAll('button, [role="button"], a')];
+              return nodes.filter(el => {
+                const t=(el.textContent||'') + ' ' + (el.getAttribute('aria-label')||'') + ' ' + (el.getAttribute('title')||'');
+                return isResetText(t);
+              });
+            }
+
+            function scan(){
+              if (!armed) return;
+              document.querySelectorAll('[data-reset-mail]').forEach(attach);
+              findCandidates().forEach(attach);
+            }
+
+            const mo = new MutationObserver(scan);
+            const kick = () => { scan(); mo.observe(document.documentElement,{childList:true,subtree:true}); window.removeEventListener('pointerdown', kick, true); };
+            window.addEventListener('pointerdown', kick, true);
+
+            // helper test
+            window.gsResetTest = (email)=>sendReset(email);
+          })();`;
+          fs.writeFileSync('dist/email-reset-shim.js', code);
+          JS
+
+          # Inietta lo shim (cache-busting = BUILD_TAG)
+          if [ -f dist/index.html ]; then
+            if grep -q "email-reset-shim.js" dist/index.html; then
+              sed -i -E "s#email-reset-shim\\.js(\\?v=[^\"']+)?#email-reset-shim.js?v=${BUILD_TAG}#g" dist/index.html
+            else
+              sed -i "s#</body>#  <script type=\"module\" src=\"./email-reset-shim.js?v=${BUILD_TAG}\"></script>\n</body>#" dist/index.html
+            fi
+          fi
+
+          echo '--- SW (tail) ---'
+          tail -n 30 dist/service-worker.js
+          echo '--- version.json ---'
+          cat dist/version.json || true
+
+      # 5.2) Pagina /reset (validate/consume via JSONP)
       - name: Add /reset page (Google Apps Script JSONP)
         working-directory: source
         shell: bash
@@ -257,7 +349,7 @@ jobs:
               <div id="ok" class="space-y-3" style="display:none">
                 <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset.</p>
                 <button id="go" class="w-full rounded-lg py-2 bg-indigo-600 text-white">Conferma reset</button>
-                <p class="text-xs text-slate-500">Dopo la conferma, l’app aprirà la schermata per creare un nuovo PIN.</p>
+                <p class="text-xs text-slate-500">Dopo la conferma, torna nell’app <b>Gestore Spese</b> e imposta un nuovo PIN.</p>
               </div>
             </main>
             <script>
@@ -277,25 +369,45 @@ jobs:
               }
               function pickToken(){
                 var sp=new URL(location.href).searchParams;
-                return sp.get('t') || sp.get('token') || sp.get('code') || null;
+                var keys=['t','token','code','k'];
+                for(var i=0;i<keys.length;i++){ var v=sp.get(keys[i]); if(v) return v; }
+                for (const [k,v] of sp.entries()){ if(String(v).length>12) return v; }
+                return null;
+              }
+              function validateAny(t, cb){
+                var tried=0, done=false;
+                function tryOne(param){
+                  tried++;
+                  jsonp(ENDPOINT+'?action=validate&'+param+'='+encodeURIComponent(t), function(res){
+                    if(done) return;
+                    if(res && res.ok){ done=true; cb(true, param); }
+                    else if(tried<3){
+                      if(param==='t') tryOne('token'); else if(param==='token') tryOne('code'); else tryOne('t');
+                    } else { cb(false, null); }
+                  });
+                }
+                tryOne('t');
+              }
+              function consumeWith(param, t, cb){
+                jsonp(ENDPOINT+'?action=consume&'+param+'='+encodeURIComponent(t), function(res){
+                  cb(!!(res&&res.ok));
+                });
               }
               var msg = document.getElementById('msg'), ok = document.getElementById('ok');
               function showInvalid(){ ok.style.display='none'; msg.style.display='block'; msg.textContent='Link non valido o scaduto.'; }
               function showValid(){ msg.style.display='none'; ok.style.display='block'; }
-
               if(!ENDPOINT){ showInvalid(); return; }
               var t = pickToken();
               if(!t){ showInvalid(); return; }
-
-              jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
-                if(!(v&&v.ok)){ showInvalid(); return; }
+              validateAny(t, function(valid, paramUsed){
+                if(!valid){ showInvalid(); return; }
                 showValid();
                 document.getElementById('go').onclick=function(){
-                  jsonp(ENDPOINT+'?action=consume&t='+encodeURIComponent(t), function(c){
-                    if(!(c&&c.ok)){ showInvalid(); return; }
-                    try { localStorage.setItem('gs_reset_ok','1'); } catch(e){}
-                    // prova ad aprire direttamente la UI del nuovo PIN
-                    location.replace('/gestore/?reset=1#new-pin');
+                  consumeWith(paramUsed||'t', t, function(okRes){
+                    msg.style.display='block'; ok.style.display='none';
+                    msg.textContent = okRes
+                      ? 'Reset confermato. Ora riapri l’app e imposta un nuovo PIN.'
+                      : 'Qualcosa è andato storto. Riprova.';
                   });
                 };
               });
@@ -308,7 +420,7 @@ jobs:
           mkdir -p dist/reset
           cp -R reset/* dist/reset/
 
-      # 7) Deploy su gh-pages
+      # 6) Deploy su gh-pages della repo "gestore"
       - name: Push to gestore/gh-pages
         uses: peaceiris/actions-gh-pages@v3
         with:
