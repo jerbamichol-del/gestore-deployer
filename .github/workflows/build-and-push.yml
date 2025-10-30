@@ -82,7 +82,7 @@ jobs:
           if (Array.isArray(m.icons)) {
             m.icons=m.icons.map(ic=>{
               if(ic && ic.src){
-                const clean = String(ic.src).replace(/^(\.?\/)+/,'').replace(/^\//,'');
+                const clean = String(ic.src).replace(/^(\\.?\\/)+/,'').replace(/^\\//,'');
                 ic.src = '/gestore/' + clean;
               }
               return ic;
@@ -90,7 +90,7 @@ jobs:
           }
           if (m.share_target && m.share_target.action){
             const a = m.share_target.action || '';
-            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\+/, '');
+            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\\/+/, '');
           }
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
@@ -216,8 +216,8 @@ jobs:
             fi
           fi
 
-      # 5.2) Pagina /reset: **SOLO validate**, poi redirect all’app con ?resetToken=&email=
-      - name: Add /reset page (validate then redirect)
+      # 5.2) Pagina /reset: VALIDATE + CONSUME, poi redirect all’app con ?resetToken=&email=
+      - name: Add /reset page (validate + consume then redirect)
         working-directory: source
         shell: bash
         env:
@@ -265,15 +265,22 @@ jobs:
               function showValid(){ msg.style.display='none'; ok.style.display='block'; }
               if(!ENDPOINT || !t){ showInvalid(); return; }
 
-              // SOLO VALIDATE (niente consume qui!)
+              // 1) validate
               jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
                 if(!(v&&v.ok)){ showInvalid(); return; }
                 if(!email && v.email){ email = v.email || ''; }
                 showValid();
+
+                // 2) consume + redirect
                 document.getElementById('go').onclick=function(){
-                  var SCOPE = getScope();
-                  var appUrl = location.origin + SCOPE + '?resetToken=' + encodeURIComponent(t) + '&email=' + encodeURIComponent(email || '');
-                  location.replace(appUrl);
+                  jsonp(ENDPOINT+'?action=consume&t='+encodeURIComponent(t), function(c){
+                    if(!(c&&c.ok)){ showInvalid(); return; }
+                    try { sessionStorage.setItem('gs_reset_consumed','1'); } catch(e){}
+                    var SCOPE = getScope();
+                    var appUrl = location.origin + SCOPE + '?resetToken=' +
+                                 encodeURIComponent(t) + '&email=' + encodeURIComponent(email || '');
+                    location.replace(appUrl);
+                  });
                 };
               });
             })();
