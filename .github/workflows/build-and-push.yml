@@ -3,7 +3,7 @@ name: Build and push to gestore/gh-pages
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *" # ogni 10 minuti cerca aggiornamenti
+    - cron: "*/10 * * * *" # ogni 10 minuti
 
 permissions:
   contents: write
@@ -90,7 +90,7 @@ jobs:
           }
           if (m.share_target && m.share_target.action){
             const a = m.share_target.action || '';
-            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\\/+/, '');
+            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\+/, '');
           }
           fs.writeFileSync(p, JSON.stringify(m,null,2));
           "
@@ -138,7 +138,7 @@ jobs:
           # version.json con hash commit
           node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
 
-          # pwa-update.js (mostra banner solo quando cambia commit o c'è waiting)
+          # pwa-update.js
           node - <<'JS'
           const fs = require('fs');
           const code = `(function(){
@@ -216,8 +216,8 @@ jobs:
             fi
           fi
 
-      # 5.2) Pagina /reset: solo VALIDATE → poi redirect all’app con ?resetToken=&email=
-      - name: Add /reset page (Google Apps Script JSONP)
+      # 5.2) Pagina /reset: **SOLO validate**, poi redirect all’app con ?resetToken=&email=
+      - name: Add /reset page (validate then redirect)
         working-directory: source
         shell: bash
         env:
@@ -237,9 +237,9 @@ jobs:
               <h1 class="text-xl font-semibold text-slate-900">Reimposta PIN</h1>
               <div id="msg" class="text-slate-700">Verifica del link…</div>
               <div id="ok" class="space-y-3" style="display:none">
-                <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset.</p>
+                <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset nell’app.</p>
                 <button id="go" class="w-full rounded-lg py-2 bg-indigo-600 text-white">Conferma reset</button>
-                <p class="text-xs text-slate-500">Dopo la conferma verrai portato all’app per impostare il nuovo PIN.</p>
+                <p class="text-xs text-slate-500">Verrai portato su <b>Gestore Spese</b> per impostare il nuovo PIN.</p>
               </div>
             </main>
             <script>
@@ -265,10 +265,10 @@ jobs:
               function showValid(){ msg.style.display='none'; ok.style.display='block'; }
               if(!ENDPOINT || !t){ showInvalid(); return; }
 
-              // SOLO validate (non consumiamo qui)
+              // SOLO VALIDATE (niente consume qui!)
               jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
                 if(!(v&&v.ok)){ showInvalid(); return; }
-                if(!email && v.email){ email = v.email; }
+                if(!email && v.email){ email = v.email || ''; }
                 showValid();
                 document.getElementById('go').onclick=function(){
                   var SCOPE = getScope();
