@@ -154,7 +154,7 @@ jobs:
               var w=document.createElement('div');
               w.id='pwa-update-banner';
               w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border bg-white shadow-xl p-4 flex items-start gap-3';
-              w.innerHTML='<div class="flex-1"><h3 class="font-semibold">Aggiornamento disponibile</h3><p class="text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-200">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
+              w.innerHTML='<div class="flex-1"><h3 class="font-semibold">Aggiornamento disponibile</h3><p class="text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-2 00">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
               document.body.appendChild(w);
               document.getElementById('pwa-update-later').onclick=function(){ w.remove(); onDismiss&&onDismiss(); };
               document.getElementById('pwa-update-now').onclick=function(){ w.remove(); try { sessionStorage.setItem(FLAG,'1'); } catch(e){} onAccept&&onAccept(); };
@@ -216,7 +216,7 @@ jobs:
             fi
           fi
 
-      # 5.2) Pagina /reset: valida, consuma e reindirizza all’app con ?resetToken=&email=
+      # 5.2) Pagina /reset: valida e reindirizza all’app con ?resetToken=&email= (NON consuma qui!)
       - name: Add /reset page (Google Apps Script JSONP)
         working-directory: source
         shell: bash
@@ -237,9 +237,8 @@ jobs:
               <h1 class="text-xl font-semibold text-slate-900">Reimposta PIN</h1>
               <div id="msg" class="text-slate-700">Verifica del link…</div>
               <div id="ok" class="space-y-3" style="display:none">
-                <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset.</p>
+                <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset nell’app.</p>
                 <button id="go" class="w-full rounded-lg py-2 bg-indigo-600 text-white">Conferma reset</button>
-                <p class="text-xs text-slate-500">Dopo la conferma verrai portato all’app per impostare il nuovo PIN.</p>
               </div>
             </main>
             <script>
@@ -257,6 +256,7 @@ jobs:
                 document.head.appendChild(s);
               }
               function getScope(){ return '/gestore/'; }
+
               var sp = new URL(location.href).searchParams;
               var t = sp.get('t') || sp.get('token') || sp.get('code') || sp.get('k');
               var email = sp.get('email') || '';
@@ -264,17 +264,17 @@ jobs:
               function showInvalid(){ ok.style.display='none'; msg.style.display='block'; msg.textContent='Link non valido o scaduto.'; }
               function showValid(){ msg.style.display='none'; ok.style.display='block'; }
               if(!ENDPOINT || !t){ showInvalid(); return; }
+
+              // 1) validate — NON consumiamo qui
               jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
                 if(!(v&&v.ok)){ showInvalid(); return; }
-                if(!email && v.email){ email = v.email; }
+                if(!email && v.email){ email = v.email || ''; }
                 showValid();
                 document.getElementById('go').onclick=function(){
-                  jsonp(ENDPOINT+'?action=consume&t='+encodeURIComponent(t), function(c){
-                    if(!(c&&c.ok)){ showInvalid(); return; }
-                    var SCOPE = getScope();
-                    var appUrl = location.origin + SCOPE + '?resetToken=' + encodeURIComponent(t) + '&email=' + encodeURIComponent(email || '');
-                    location.replace(appUrl);
-                  });
+                  // 2) redirect diretto all'app con token & email
+                  var SCOPE = getScope();
+                  var appUrl = location.origin + SCOPE + '?resetToken=' + encodeURIComponent(t) + '&email=' + encodeURIComponent(email || '');
+                  location.replace(appUrl);
                 };
               });
             })();
