@@ -1,0 +1,124 @@
+name: Catalog snapshots
+
+on:
+  workflow_dispatch: {}       # lancio manuale
+  schedule:
+    - cron: "17 4 * * *"     # opzionale: snapshot giornaliero 04:17
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gestore-deployer (self)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Checkout gestore (main)
+        uses: actions/checkout@v4
+        with:
+          repository: jerbamichol-del/gestore
+          ref: main
+          path: source-main
+
+      - name: Checkout gestore (gh-pages)
+        uses: actions/checkout@v4
+        with:
+          repository: jerbamichol-del/gestore
+          ref: gh-pages
+          path: source-gh
+          fetch-depth: 1
+
+      - name: Build full catalogs (trees + inline + copie complete)
+        shell: bash
+        run: |
+          set -e
+          rm -rf snapshot-out
+          mkdir -p snapshot-out/gestore-main/files snapshot-out/gestore-gh/files
+
+          # Parametri per embed testo
+          TEXT_EXTS='js mjs cjs ts tsx jsx html css scss json md yml yaml xml svg txt map sh ps1 properties gradle java kt'
+          MAX_EMBED_BYTES=$((1024*1024))  # 1 MB
+
+          # ---- MAIN ----
+          (cd source-main && \
+            find . -type d \( -path './.git' -o -path './node_modules' -o -path './.next' -o -path './coverage' -o -path './android' -o -path './ios' \) -prune -o -type f -print \
+          ) | sort > snapshot-out/gestore-main/TREE.txt
+
+          while IFS= read -r f; do
+            src="source-main/$f"; [ -f "$src" ] || continue
+            dst="snapshot-out/gestore-main/files/$f"
+            mkdir -p "$(dirname "$dst")"
+            cp -f "$src" "$dst" || true
+          done < snapshot-out/gestore-main/TREE.txt
+
+          echo "# CATALOG_MAIN (testo)" > snapshot-out/gestore-main/CATALOG_MAIN.md
+          echo "Embed testo (<= $MAX_EMBED_BYTES bytes per file)" >> snapshot-out/gestore-main/CATALOG_MAIN.md
+          while IFS= read -r f; do
+            src="source-main/$f"; [ -f "$src" ] || continue
+            base="${f##*/}"; ext="${base##*.}"; lext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+            if echo "$TEXT_EXTS" | grep -qw "$lext"; then
+              sz=$(stat -c%s "$src" 2>/dev/null || echo 0)
+              if [ "$sz" -le "$MAX_EMBED_BYTES" ]; then
+                echo -e "\n\n---\n\n## \`$f\`\n" >> snapshot-out/gestore-main/CATALOG_MAIN.md
+                echo -e '```'"$lext" >> snapshot-out/gestore-main/CATALOG_MAIN.md
+                sed 's/\r$//' "$src" >> snapshot-out/gestore-main/CATALOG_MAIN.md || true
+                echo -e '\n```' >> snapshot-out/gestore-main/CATALOG_MAIN.md
+              else
+                echo "- [SKIP EMBED >${MAX_EMBED_BYTES}B] $f ($sz bytes) — copia in files/" >> snapshot-out/gestore-main/CATALOG_MAIN.md
+              fi
+            fi
+          done < snapshot-out/gestore-main/TREE.txt
+
+          # ---- GH-PAGES ----
+          (cd source-gh && find . -type d -path './.git' -prune -o -type f -print) | sort > snapshot-out/gestore-gh/TREE.txt
+          while IFS= read -r f; do
+            src="source-gh/$f"; [ -f "$src" ] || continue
+            dst="snapshot-out/gestore-gh/files/$f"
+            mkdir -p "$(dirname "$dst")"
+            cp -f "$src" "$dst" || true
+          done < snapshot-out/gestore-gh/TREE.txt
+
+          echo "# CATALOG_GH (testo)" > snapshot-out/gestore-gh/CATALOG_GH.md
+          echo "Embed testo (<= $MAX_EMBED_BYTES bytes per file)" >> snapshot-out/gestore-gh/CATALOG_GH.md
+          while IFS= read -r f; do
+            src="source-gh/$f"; [ -f "$src" ] || continue
+            base="${f##*/}"; ext="${base##*.}"; lext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+            if echo "$TEXT_EXTS" | grep -qw "$lext"; then
+              sz=$(stat -c%s "$src" 2>/dev/null || echo 0)
+              if [ "$sz" -le "$MAX_EMBED_BYTES" ]; then
+                echo -e "\n\n---\n\n## \`$f\`\n" >> snapshot-out/gestore-gh/CATALOG_GH.md
+                echo -e '```'"$lext" >> snapshot-out/gestore-gh/CATALOG_GH.md
+                sed 's/\r$//' "$src" >> snapshot-out/gestore-gh/CATALOG_GH.md || true
+                echo -e '\n```' >> snapshot-out/gestore-gh/CATALOG_GH.md
+              else
+                echo "- [SKIP EMBED >${MAX_EMBED_BYTES}B] $f ($sz bytes) — copia in files/" >> snapshot-out/gestore-gh/CATALOG_GH.md
+              fi
+            fi
+          done < snapshot-out/gestore-gh/TREE.txt
+
+          # ---- WORKFLOW PREVIEW dal file reale ----
+          mkdir -p snapshot-out/workflow-preview
+          if [ -f ".github/workflows/build-and-push.yml" ]; then
+            {
+              echo "# WORKFLOW_PREVIEW"
+              echo
+              echo '```yaml'
+              sed 's/\r$//' ".github/workflows/build-and-push.yml"
+              echo '```'
+            } > snapshot-out/workflow-preview/WORKFLOW_PREVIEW.md
+          fi
+
+      - name: Deploy snapshots (single commit)
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: catalog-snapshots
+          folder: snapshot-out
+          clean: true
+          single-commit: true
+          commit-message: "snapshot: gestore main + gh-pages (single commit)"
