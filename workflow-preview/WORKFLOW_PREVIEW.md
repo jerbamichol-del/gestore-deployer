@@ -1,0 +1,308 @@
+# WORKFLOW_PREVIEW
+
+```yaml
+name: Build and push to gestore/gh-pages
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *" # ogni 10 minuti
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) Prende il codice dalla tua repo "gestore"
+      - name: Checkout gestore (source)
+        uses: actions/checkout@v4
+        with:
+          repository: jerbamichol-del/gestore
+          ref: main
+          path: source
+
+      # 1.1) SHA del commit sorgente (per versioning stabile)
+      - name: Read source commit SHA
+        id: srcsha
+        working-directory: source
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      # 2) Node + deps
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        working-directory: source
+        run: npm install
+
+      # 3) Patch ai typo comuni di AI Studio
+      - name: Patch AI Studio typos
+        working-directory: source
+        run: |
+          grep -RIl "import React, 'react';" . | xargs -r sed -i "s/import React, 'react';/import React from 'react';/g"
+          grep -RIl "import React, from 'react';" . | xargs -r sed -i "s/import React, from 'react';/import React from 'react';/g"
+
+      # 4) Build Vite per GitHub Pages (base /gestore/)
+      - name: Build (Vite for Pages)
+        working-directory: source
+        env:
+          VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
+        run: |
+          cat > vite.pages.config.mjs << 'EOF'
+          import react from '@vitejs/plugin-react'
+          import { defineConfig } from 'vite'
+          export default defineConfig({
+            base: '/gestore/',
+            plugins: [react()],
+            build: { outDir: 'dist' },
+            define: { 'process.env.API_KEY': JSON.stringify(process.env.VITE_GEMINI_API_KEY || '') },
+          })
+          EOF
+          npx vite build -c vite.pages.config.mjs
+
+      # 5) Patch PWA (manifest/icona, fallback SPA)
+      - name: Patch PWA assets
+        working-directory: source
+        shell: bash
+        env:
+          BUILD_TAG: ${{ steps.srcsha.outputs.sha }}
+        run: |
+          set -e
+          mkdir -p dist
+          [ -f manifest.json ] && cp -v manifest.json dist/ || true
+          for f in icon-192.svg icon-512.svg; do [ -f "$f" ] && cp -v "$f" dist/ || true; done
+          [ -d icons ] && cp -rv icons dist/ || true
+
+          node -e "
+          const fs=require('fs'); const p='dist/manifest.json';
+          if (!fs.existsSync(p)) process.exit(0);
+          const m=JSON.parse(fs.readFileSync(p,'utf8'));
+          m.id='/gestore/'; m.start_url='/gestore/'; m.scope='/gestore/';
+          if (Array.isArray(m.icons)) {
+            m.icons=m.icons.map(ic=>{
+              if(ic && ic.src){
+                const clean = String(ic.src).replace(/^(\\.?\\/)+/,'').replace(/^\\//,'');
+                ic.src = '/gestore/' + clean;
+              }
+              return ic;
+            });
+          }
+          if (m.share_target && m.share_target.action){
+            const a = m.share_target.action || '';
+            m.share_target.action = a.startsWith('/gestore/') ? a : '/gestore/' + a.replace(/^\\/+/, '');
+          }
+          fs.writeFileSync(p, JSON.stringify(m,null,2));
+          "
+
+          # versionamento riferimenti
+          sed -i -E "s#<link rel=\"manifest\"[^>]*>#<link rel=\"manifest\" href=\"/gestore/manifest.json?v=${BUILD_TAG}\" />#" dist/index.html || true
+          sed -i -E "s#serviceWorker\.register\([^)]*\)#serviceWorker.register('/gestore/service-worker.js?v=${BUILD_TAG}', { scope: '/gestore/' })#" dist/index.html || true
+
+          # SPA fallback per GitHub Pages
+          cp -v dist/index.html dist/404.html || true
+
+      # 5.1) SW controllato + pwa-update (banner solo su versione nuova)
+      - name: Ensure PWA update prompt & controlled SW
+        working-directory: source
+        shell: bash
+        env:
+          BUILD_TAG: ${{ steps.srcsha.outputs.sha }}
+        run: |
+          set -e
+          mkdir -p dist
+
+          # service-worker.js dal sorgente o placeholder
+          if [ -f service-worker.js ]; then
+            cp -fv service-worker.js dist/service-worker.js
+          elif [ ! -f dist/service-worker.js ]; then
+            echo "// placeholder SW" > dist/service-worker.js
+          fi
+
+          # rimuovi skipWaiting automatici
+          sed -i -E 's/\.then\(\s*\(\)\s*=>\s*self\.skipWaiting\(\)\s*\)//g' dist/service-worker.js || true
+          sed -i -E 's/\bself\s*\.\s*skipWaiting\s*\(\s*\)\s*;?//g' dist/service-worker.js || true
+
+          # listener canonico per SKIP_WAITING
+          node - <<'JS'
+          const fs = require('fs');
+          const p = 'dist/service-worker.js';
+          let s = fs.readFileSync(p, 'utf8');
+          s = s.replace(/self\.addEventListener\(\s*['"]message['"][\s\S]*?\}\s*\)\s*;?/g, '');
+          if (!/SKIP_WAITING/.test(s)) {
+            s += "\nself.addEventListener('message', (event) => { if (event.data && (event.data === 'SKIP_WAITING' || event.data.type === 'SKIP_WAITING')) { self.skipWaiting(); } });\n";
+          }
+          fs.writeFileSync(p, s);
+          JS
+
+          # version.json con hash commit
+          node -e "require('fs').writeFileSync('dist/version.json', JSON.stringify({ commit: process.env.BUILD_TAG, builtAt: new Date().toISOString() }, null, 2))"
+
+          # pwa-update.js
+          node - <<'JS'
+          const fs = require('fs');
+          const code = `(function(){
+            if(!('serviceWorker' in navigator)) return;
+            var scopeGuess = '/gestore/';
+            var FLAG = 'pwa-skip-waiting';
+            var PERIOD_MS = 15 * 60 * 1000;
+            var FIRST_START_DELAY = 2000;
+            var VERSION_URL = scopeGuess + 'version.json?ts=' + Date.now();
+            var LAST_KEY = 'pwa-last-commit';
+            function banner(onAccept,onDismiss){
+              if (document.getElementById('pwa-update-banner')) return;
+              var w=document.createElement('div');
+              w.id='pwa-update-banner';
+              w.className='fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] w-[92%] max-w-md rounded-xl border bg-white shadow-xl p-4 flex items-start gap-3';
+              w.innerHTML='<div class="flex-1"><h3 class="font-semibold">Aggiornamento disponibile</h3><p class="text-sm mt-1">È pronta una nuova versione dell\\'app.</p></div><div class="flex gap-2"><button id="pwa-update-later" class="px-3 py-2 text-sm rounded-lg bg-slate-200">Più tardi</button><button id="pwa-update-now" class="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white">Aggiorna</button></div>';
+              document.body.appendChild(w);
+              document.getElementById('pwa-update-later').onclick=function(){ w.remove(); onDismiss&&onDismiss(); };
+              document.getElementById('pwa-update-now').onclick=function(){ w.remove(); try { sessionStorage.setItem(FLAG,'1'); } catch(e){} onAccept&&onAccept(); };
+            }
+            navigator.serviceWorker.addEventListener('controllerchange', function(){
+              try { if (sessionStorage.getItem(FLAG) === '1') { sessionStorage.removeItem(FLAG); location.reload(); } } catch(e){}
+            });
+            function wire(reg){
+              function showIfWaiting(){
+                if(reg.waiting && navigator.serviceWorker.controller){
+                  banner(function(){ reg.waiting && reg.waiting.postMessage({type:'SKIP_WAITING'}); }, function(){});
+                }
+              }
+              showIfWaiting();
+              reg.addEventListener('updatefound', function(){
+                var nw = reg.installing;
+                nw && nw.addEventListener('statechange', function(){
+                  if(nw.state==='installed' && navigator.serviceWorker.controller){ showIfWaiting(); }
+                });
+              });
+              function checkVersion(){
+                fetch(VERSION_URL, { cache: 'no-store' })
+                  .then(r=>r.json())
+                  .then(v=>{
+                    var last = ''; try { last = localStorage.getItem(LAST_KEY)||''; } catch(e){}
+                    var cur = (v && v.commit) || '';
+                    if (cur && cur !== last) {
+                      if (!reg.waiting) {
+                        banner(function(){
+                          try { localStorage.setItem(LAST_KEY, String(cur)); } catch(e){}
+                          location.reload();
+                        }, function(){});
+                      }
+                    }
+                  }).catch(function(){});
+              }
+              var check = function(){ reg.update().catch(function(){}); checkVersion(); };
+              setTimeout(check, FIRST_START_DELAY);
+              window.addEventListener('focus', check);
+              document.addEventListener('visibilitychange', function(){ if(document.visibilityState === 'visible') check(); });
+              setInterval(check, PERIOD_MS);
+            }
+            window.addEventListener('load', function(){
+              (navigator.serviceWorker.getRegistration(scopeGuess).catch(function(){}) )
+                .then(function(reg){ return reg || navigator.serviceWorker.getRegistration(); })
+                .then(function(reg){ reg && wire(reg); })
+                .catch(function(){});
+            });
+          })();`;
+          fs.writeFileSync('dist/pwa-update.js', code);
+          JS
+
+          # inietta pwa-update con cache-busting
+          if [ -f dist/index.html ]; then
+            if grep -q "pwa-update.js" dist/index.html; then
+              sed -i -E "s#pwa-update\.js(\?v=[^\"']+)?#pwa-update.js?v=${BUILD_TAG}#g" dist/index.html
+            else
+              sed -i "s#</body>#  <script type=\"module\" src=\"./pwa-update.js?v=${BUILD_TAG}\"></script>\n</body>#" dist/index.html
+            fi
+          fi
+
+      # 5.2) Pagina /reset: VALIDATE + CONSUME, poi redirect all’app con ?resetToken=&email=
+      - name: Add /reset page (validate + consume then redirect)
+        working-directory: source
+        shell: bash
+        env:
+          RESET_ENDPOINT: "https://script.google.com/macros/s/AKfycbzmq-PTrMcMdrYqCRX29_S034zCaj5ttyc3tZhdhjV77wF6n99LKricFgzy7taGqKOo/exec"
+        run: |
+          set -e
+          node - <<'JS'
+          const fs = require('fs');
+          const ENDPOINT = process.env.RESET_ENDPOINT || '';
+          const html = `<!doctype html><html lang="it"><head>
+          <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Reimposta PIN</title>
+          <script src="https://cdn.tailwindcss.com"></script>
+          </head>
+          <body class="min-h-screen flex items-center justify-center bg-slate-100 p-4">
+            <main class="w-full max-w-md bg-white shadow-xl rounded-2xl p-6 space-y-4">
+              <h1 class="text-xl font-semibold text-slate-900">Reimposta PIN</h1>
+              <div id="msg" class="text-slate-700">Verifica del link…</div>
+              <div id="ok" class="space-y-3" style="display:none">
+                <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset nell’app.</p>
+                <button id="go" class="w-full rounded-lg py-2 bg-indigo-600 text-white">Conferma reset</button>
+                <p class="text-xs text-slate-500">Verrai portato su <b>Gestore Spese</b> per impostare il nuovo PIN.</p>
+              </div>
+            </main>
+            <script>
+            (function(){
+              var ENDPOINT=${JSON.stringify(ENDPOINT)};
+              function jsonp(url, cb){
+                var c='__rp_'+Date.now()+Math.random().toString(36).slice(2);
+                window[c]=function(d){ try{delete window[c];}catch(_){}
+                  s.remove(); cb(d);
+                };
+                var s=document.createElement('script');
+                s.src=url+(url.includes('?')?'&':'?')+'callback='+c;
+                s.onerror=function(){ try{delete window[c];}catch(_){}
+                  s.remove(); cb({ok:false,error:'NETWORK'}); };
+                document.head.appendChild(s);
+              }
+              function getScope(){ return '/gestore/'; }
+              var sp = new URL(location.href).searchParams;
+              var t = sp.get('t') || sp.get('token') || sp.get('code') || sp.get('k');
+              var email = sp.get('email') || '';
+              var msg = document.getElementById('msg'), ok = document.getElementById('ok');
+              function showInvalid(){ ok.style.display='none'; msg.style.display='block'; msg.textContent='Link non valido o scaduto.'; }
+              function showValid(){ msg.style.display='none'; ok.style.display='block'; }
+              if(!ENDPOINT || !t){ showInvalid(); return; }
+
+              // 1) validate
+              jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
+                if(!(v&&v.ok)){ showInvalid(); return; }
+                if(!email && v.email){ email = v.email || ''; }
+                showValid();
+
+                // 2) consume + redirect
+                document.getElementById('go').onclick=function(){
+                  jsonp(ENDPOINT+'?action=consume&t='+encodeURIComponent(t), function(c){
+                    if(!(c&&c.ok)){ showInvalid(); return; }
+                    try { sessionStorage.setItem('gs_reset_consumed','1'); } catch(e){}
+                    var SCOPE = getScope();
+                    var appUrl = location.origin + SCOPE + '?resetToken=' +
+                                 encodeURIComponent(t) + '&email=' + encodeURIComponent(email || '');
+                    location.replace(appUrl);
+                  });
+                };
+              });
+            })();
+            </script>
+          </body></html>`;
+          fs.mkdirSync('reset', { recursive: true });
+          fs.writeFileSync('reset/index.html', html);
+          JS
+          mkdir -p dist/reset
+          cp -R reset/* dist/reset/
+
+      # 6) Deploy su gh-pages della repo "gestore"
+      - name: Push to gestore/gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          personal_token: ${{ secrets.GH_PAT }}
+          external_repository: jerbamichol-del/gestore
+          publish_branch: gh-pages
+          publish_dir: source/dist
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
+```
