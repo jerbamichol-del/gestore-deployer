@@ -1,9 +1,9 @@
 name: Catalog ALL for preview
 
 on:
-  workflow_dispatch: {}        # lancio manuale
+  workflow_dispatch: {}
   schedule:
-    - cron: "15 4 * * *"      # snapshot giornaliero 04:15 (opzionale)
+    - cron: "15 4 * * *"
 
 permissions:
   contents: write
@@ -33,53 +33,83 @@ jobs:
           path: source-gh
           fetch-depth: 1
 
-      - name: Build full catalogs (trees + inline text contents)
+      - name: Build full catalogs (trees + inline contents + files)
         shell: bash
         run: |
           set -e
           mkdir -p catalog/gestore-main catalog/gestore-gh
+          rm -rf catalog/gestore-main/files catalog/gestore-gh/files
+          mkdir -p catalog/gestore-main/files catalog/gestore-gh/files
 
-          # ---- MAIN: tree (escludi build e pesanti)
+          # ---------- PARAMETRI ----------
+          TEXT_EXTS='js mjs cjs ts tsx jsx html css scss json md yml yaml xml svg txt map sh ps1 properties gradle java kt'
+          MAX_EMBED_BYTES=$((1024*1024))  # 1 MB per file per embed MD (aumenta se vuoi)
+          # --------------------------------
+
+          echo "# CATALOG_MAIN (testo)" > catalog/gestore-main/CATALOG_MAIN.md
+          echo "Questo file contiene *testo* da gestore@main (embed <= $MAX_EMBED_BYTES bytes per file)." >> catalog/gestore-main/CATALOG_MAIN.md
+
+          # MAIN: TREE + COPY FILES + EMBED testo
           (cd source-main && \
-            find . -type d \( -path './.git' -o -path './node_modules' -o -path './dist' -o -path './build' -o -path './.next' -o -path './coverage' -o -path './android' -o -path './ios' \) -prune -o -type f -print \
+            find . -type d \( -path './.git' -o -path './node_modules' -o -path './.next' -o -path './coverage' -o -path './android' -o -path './ios' \) -prune -o -type f -print \
           ) | sort > catalog/gestore-main/TREE.txt
 
-          # ---- MAIN: contenuti testo in un MD unico
-          cat > catalog/gestore-main/CATALOG_MAIN.md <<'HEAD'
-          # CATALOG_MAIN (testo)
-          Questo file contiene i sorgenti *testuali* di `gestore@main` (solo estensioni note, max 200 KB/file).  
-          HEAD
-
-          exts='js ts tsx jsx mjs cjs html css scss json md yml yaml xml svg txt sh ps1 gradle properties java kt tsconfig'
           while IFS= read -r f; do
-            # skip percorsi esclusi
-            case "$f" in
-              ./node_modules/*|./dist/*|./build/*|./.next/*|./coverage/*|./android/*|./ios/*) continue ;;
-            esac
-            base="${f##*/}"
-            ext="${base##*.}"
-            if echo "$ext" | tr '[:upper:]' '[:lower:]' | grep -qwE "$(echo "$exts" | sed 's/ /|/g')"; then
-              sz=$(stat -c%s "source-main/$f" 2>/dev/null || echo 0)
-              if [ "$sz" -le 204800 ]; then
+            src="source-main/$f"
+            [ -f "$src" ] || continue
+            # copia grezza file in files/**
+            dst="catalog/gestore-main/files/$f"
+            mkdir -p "$(dirname "$dst")"
+            cp -f "$src" "$dst" || true
+
+            # se estensione testuale e <= soglia, embed in MD
+            base="${f##*/}"; ext="${base##*.}"; lext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+            if echo "$TEXT_EXTS" | grep -qw "$lext"; then
+              sz=$(stat -c%s "$src" 2>/dev/null || echo 0)
+              if [ "$sz" -le "$MAX_EMBED_BYTES" ]; then
                 echo -e "\n\n---\n\n## \`$f\`\n" >> catalog/gestore-main/CATALOG_MAIN.md
-                echo -e '```'"$ext" >> catalog/gestore-main/CATALOG_MAIN.md
-                sed 's/\r$//' "source-main/$f" >> catalog/gestore-main/CATALOG_MAIN.md || true
+                echo -e '```'"$lext" >> catalog/gestore-main/CATALOG_MAIN.md
+                sed 's/\r$//' "$src" >> catalog/gestore-main/CATALOG_MAIN.md || true
                 echo -e '\n```' >> catalog/gestore-main/CATALOG_MAIN.md
               else
-                echo -e "\n- [SKIP >200KB] $f ($sz bytes)" >> catalog/gestore-main/CATALOG_MAIN.md
+                echo "- [SKIP EMBED >${MAX_EMBED_BYTES}B] $f ($sz bytes) — copia in files/" >> catalog/gestore-main/CATALOG_MAIN.md
               fi
             fi
           done < catalog/gestore-main/TREE.txt
 
-          # ---- GH-PAGES: tree
-          (cd source-gh && find . -maxdepth 2 -type f | sort) > catalog/gestore-gh/TREE.txt
+          # GH-PAGES: TREE + COPY TUTTO + EMBED testo
+          (cd source-gh && \
+            find . -type d -path './.git' -prune -o -type f -print \
+          ) | sort > catalog/gestore-gh/TREE.txt
 
-          # Copie chiave se presenti
-          for p in index.html manifest.json version.json 404.html; do
-            [ -f "source-gh/$p" ] && cp -fv "source-gh/$p" "catalog/gestore-gh/$p" || true
-          done
+          while IFS= read -r f; do
+            src="source-gh/$f"
+            [ -f "$src" ] || continue
+            dst="catalog/gestore-gh/files/$f"
+            mkdir -p "$(dirname "$dst")"
+            cp -f "$src" "$dst" || true
+          done < catalog/gestore-gh/TREE.txt
 
-          # ---- WORKFLOW PREVIEW MD dal file reale (in chiaro)
+          echo "# CATALOG_GH (testo)" > catalog/gestore-gh/CATALOG_GH.md
+          echo "Contenuti testuali da gh-pages (embed <= $MAX_EMBED_BYTES bytes per file)." >> catalog/gestore-gh/CATALOG_GH.md
+          while IFS= read -r f; do
+            src="source-gh/$f"
+            [ -f "$src" ] || continue
+            base="${f##*/}"; ext="${base##*.}"; lext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+            if echo "$TEXT_EXTS" | grep -qw "$lext"; then
+              sz=$(stat -c%s "$src" 2>/dev/null || echo 0)
+              if [ "$sz" -le "$MAX_EMBED_BYTES" ]; then
+                echo -e "\n\n---\n\n## \`$f\`\n" >> catalog/gestore-gh/CATALOG_GH.md
+                echo -e '```'"$lext" >> catalog/gestore-gh/CATALOG_GH.md
+                sed 's/\r$//' "$src" >> catalog/gestore-gh/CATALOG_GH.md || true
+                echo -e '\n```' >> catalog/gestore-gh/CATALOG_GH.md
+              else
+                echo "- [SKIP EMBED >${MAX_EMBED_BYTES}B] $f ($sz bytes) — copia in files/" >> catalog/gestore-gh/CATALOG_GH.md
+              fi
+            fi
+          done < catalog/gestore-gh/TREE.txt
+
+          # WORKFLOW PREVIEW aggiornato dal file reale
           mkdir -p workflow-preview
           if [ -f ".github/workflows/build-and-push.yml" ]; then
             {
@@ -95,10 +125,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add catalog/ workflow-preview/WORKFLOW_PREVIEW.md || true
+          git add catalog/ workflow-preview/WORKFLOW_PREVIEW.md
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "[catalog] snapshot ALL (main + gh-pages) and workflow preview"
+            git commit -m "[catalog] snapshot ALL (main files + gh-pages files) and workflow preview"
             git push
           fi
