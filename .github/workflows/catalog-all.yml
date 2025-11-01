@@ -1,0 +1,104 @@
+name: Catalog ALL for preview
+
+on:
+  workflow_dispatch: {}        # lancio manuale
+  schedule:
+    - cron: "15 4 * * *"      # snapshot giornaliero 04:15 (opzionale)
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    if: "!contains(github.event.head_commit.message || '', '[catalog]')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gestore-deployer (self)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Checkout gestore (main)
+        uses: actions/checkout@v4
+        with:
+          repository: jerbamichol-del/gestore
+          ref: main
+          path: source-main
+
+      - name: Checkout gestore (gh-pages)
+        uses: actions/checkout@v4
+        with:
+          repository: jerbamichol-del/gestore
+          ref: gh-pages
+          path: source-gh
+          fetch-depth: 1
+
+      - name: Build full catalogs (trees + inline text contents)
+        shell: bash
+        run: |
+          set -e
+          mkdir -p catalog/gestore-main catalog/gestore-gh
+
+          # ---- MAIN: tree (escludi build e pesanti)
+          (cd source-main && \
+            find . -type d \( -path './.git' -o -path './node_modules' -o -path './dist' -o -path './build' -o -path './.next' -o -path './coverage' -o -path './android' -o -path './ios' \) -prune -o -type f -print \
+          ) | sort > catalog/gestore-main/TREE.txt
+
+          # ---- MAIN: contenuti testo in un MD unico
+          cat > catalog/gestore-main/CATALOG_MAIN.md <<'HEAD'
+          # CATALOG_MAIN (testo)
+          Questo file contiene i sorgenti *testuali* di `gestore@main` (solo estensioni note, max 200 KB/file).  
+          HEAD
+
+          exts='js ts tsx jsx mjs cjs html css scss json md yml yaml xml svg txt sh ps1 gradle properties java kt tsconfig'
+          while IFS= read -r f; do
+            # skip percorsi esclusi
+            case "$f" in
+              ./node_modules/*|./dist/*|./build/*|./.next/*|./coverage/*|./android/*|./ios/*) continue ;;
+            esac
+            base="${f##*/}"
+            ext="${base##*.}"
+            if echo "$ext" | tr '[:upper:]' '[:lower:]' | grep -qwE "$(echo "$exts" | sed 's/ /|/g')"; then
+              sz=$(stat -c%s "source-main/$f" 2>/dev/null || echo 0)
+              if [ "$sz" -le 204800 ]; then
+                echo -e "\n\n---\n\n## \`$f\`\n" >> catalog/gestore-main/CATALOG_MAIN.md
+                echo -e '```'"$ext" >> catalog/gestore-main/CATALOG_MAIN.md
+                sed 's/\r$//' "source-main/$f" >> catalog/gestore-main/CATALOG_MAIN.md || true
+                echo -e '\n```' >> catalog/gestore-main/CATALOG_MAIN.md
+              else
+                echo -e "\n- [SKIP >200KB] $f ($sz bytes)" >> catalog/gestore-main/CATALOG_MAIN.md
+              fi
+            fi
+          done < catalog/gestore-main/TREE.txt
+
+          # ---- GH-PAGES: tree
+          (cd source-gh && find . -maxdepth 2 -type f | sort) > catalog/gestore-gh/TREE.txt
+
+          # Copie chiave se presenti
+          for p in index.html manifest.json version.json 404.html; do
+            [ -f "source-gh/$p" ] && cp -fv "source-gh/$p" "catalog/gestore-gh/$p" || true
+          done
+
+          # ---- WORKFLOW PREVIEW MD dal file reale (in chiaro)
+          mkdir -p workflow-preview
+          if [ -f ".github/workflows/build-and-push.yml" ]; then
+            {
+              echo "# WORKFLOW_PREVIEW"
+              echo
+              echo '```yaml'
+              sed 's/\r$//' ".github/workflows/build-and-push.yml"
+              echo '```'
+            } > workflow-preview/WORKFLOW_PREVIEW.md
+          fi
+
+      - name: Commit catalog snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add catalog/ workflow-preview/WORKFLOW_PREVIEW.md || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "[catalog] snapshot ALL (main + gh-pages) and workflow preview"
+            git push
+          fi
