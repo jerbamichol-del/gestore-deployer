@@ -1,6 +1,7 @@
 name: Mirror workflow for preview
 
 on:
+  workflow_dispatch: {}   # <— permette il run manuale
   push:
     branches: [main]
     paths:
@@ -11,7 +12,8 @@ permissions:
 
 jobs:
   mirror:
-    if: "!contains(github.event.head_commit.message, '[mirror]')"
+    # evita loop sui commit del mirror, anche quando head_commit è nullo
+    if: "!contains(github.event.head_commit.message || '', '[mirror]')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
