@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: gestore-gh-pages
+  cancel-in-progress: true
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
@@ -19,6 +23,7 @@ jobs:
           repository: jerbamichol-del/gestore
           ref: main
           path: source
+          fetch-depth: 1
 
       # 1.1) SHA del commit sorgente (per versioning stabile)
       - name: Read source commit SHA
@@ -26,15 +31,22 @@ jobs:
         working-directory: source
         run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      # 2) Node + deps
+      # 2) Node + cache + deps
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: "npm"
+          cache-dependency-path: source/package-lock.json
 
-      - name: Install deps
+      - name: Install deps (npm ci se presente)
         working-directory: source
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       # 3) Patch ai typo comuni di AI Studio
       - name: Patch AI Studio typos
