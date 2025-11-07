@@ -31,15 +31,23 @@ jobs:
         working-directory: source
         run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      # 2) Node + cache + deps
-      - name: Setup Node
+      # 2) Node con cache SOLO se esiste package-lock.json
+      - name: Setup Node (with cache)
+        if: ${{ hashFiles('source/package-lock.json') != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: "npm"
+          cache: npm
           cache-dependency-path: source/package-lock.json
 
-      - name: Install deps (npm ci se presente)
+      - name: Setup Node (no cache)
+        if: ${{ hashFiles('source/package-lock.json') == '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 3) Install deps (usa ci se c'è il lock, altrimenti install)
+      - name: Install deps
         working-directory: source
         run: |
           if [ -f package-lock.json ]; then
@@ -48,14 +56,14 @@ jobs:
             npm install
           fi
 
-      # 3) Patch ai typo comuni di AI Studio
+      # 4) Patch ai typo comuni di AI Studio
       - name: Patch AI Studio typos
         working-directory: source
         run: |
           grep -RIl "import React, 'react';" . | xargs -r sed -i "s/import React, 'react';/import React from 'react';/g"
           grep -RIl "import React, from 'react';" . | xargs -r sed -i "s/import React, from 'react';/import React from 'react';/g"
 
-      # 4) Build Vite per GitHub Pages (base /gestore/)
+      # 5) Build Vite per GitHub Pages (base /gestore/)
       - name: Build (Vite for Pages)
         working-directory: source
         env:
@@ -73,7 +81,7 @@ jobs:
           EOF
           npx vite build -c vite.pages.config.mjs
 
-      # 5) Patch PWA (manifest/icona, fallback SPA)
+      # 6) Patch PWA (manifest/icona, fallback SPA)
       - name: Patch PWA assets
         working-directory: source
         shell: bash
@@ -114,7 +122,7 @@ jobs:
           # SPA fallback per GitHub Pages
           cp -v dist/index.html dist/404.html || true
 
-      # 5.1) SW controllato + pwa-update (banner solo su versione nuova)
+      # 6.1) SW controllato + pwa-update (banner solo su versione nuova)
       - name: Ensure PWA update prompt & controlled SW
         working-directory: source
         shell: bash
@@ -228,7 +236,7 @@ jobs:
             fi
           fi
 
-      # 5.2) Pagina /reset: VALIDATE + CONSUME, poi redirect all’app con ?resetToken=&email=
+      # 6.2) Pagina /reset: VALIDATE + CONSUME, poi redirect all’app
       - name: Add /reset page (validate + consume then redirect)
         working-directory: source
         shell: bash
@@ -304,7 +312,7 @@ jobs:
           mkdir -p dist/reset
           cp -R reset/* dist/reset/
 
-      # 6) Deploy su gh-pages della repo "gestore"
+      # 7) Deploy su gh-pages della repo "gestore"
       - name: Push to gestore/gh-pages
         uses: peaceiris/actions-gh-pages@v3
         with:
