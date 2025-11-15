@@ -1,0 +1,39 @@
+{
+  "name": "Gestore Spese Intuitivo",
+  "short_name": "Gestore Spese",
+  "description": "Una semplice applicazione per tracciare le spese, con funzionalità offline.",
+  "start_url": "/gestore/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f1f5f9",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "/gestore/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/gestore/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ],
+  "share_target": {
+    "action": "/gestore/share-target/",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [
+        {
+          "name": "screenshot",
+          "accept": [
+            "image/*"
+          ]
+        }
+      ]
+    }
+  },
+  "id": "/gestore/",
+  "scope": "/gestore/"
+}
