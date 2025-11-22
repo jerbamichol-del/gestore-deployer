@@ -1,0 +1,59 @@
+<!doctype html><html lang="it"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reimposta PIN</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen flex items-center justify-center bg-slate-100 p-4">
+  <main class="w-full max-w-md bg-white shadow-xl rounded-2xl p-6 space-y-4">
+    <h1 class="text-xl font-semibold text-slate-900">Reimposta PIN</h1>
+    <div id="msg" class="text-slate-700">Verifica del link…</div>
+    <div id="ok" class="space-y-3" style="display:none">
+      <p class="text-slate-700">Il link è valido. Premi “Conferma” per procedere al reset nell’app.</p>
+      <button id="go" class="w-full rounded-lg py-2 bg-indigo-600 text-white">Conferma reset</button>
+      <p class="text-xs text-slate-500">Verrai portato su <b>Gestore Spese</b> per impostare il nuovo PIN.</p>
+    </div>
+  </main>
+  <script>
+  (function(){
+    var ENDPOINT="https://script.google.com/macros/s/AKfycbzmq-PTrMcMdrYqCRX29_S034zCaj5ttyc3tZhdhjV77wF6n99LKricFgzy7taGqKOo/exec";
+    function jsonp(url, cb){
+      var c='__rp_'+Date.now()+Math.random().toString(36).slice(2);
+      window[c]=function(d){ try{delete window[c];}catch(_){}
+        s.remove(); cb(d);
+      };
+      var s=document.createElement('script');
+      s.src=url+(url.includes('?')?'&':'?')+'callback='+c;
+      s.onerror=function(){ try{delete window[c];}catch(_){}
+        s.remove(); cb({ok:false,error:'NETWORK'}); };
+      document.head.appendChild(s);
+    }
+    function getScope(){ return '/gestore/'; }
+    var sp = new URL(location.href).searchParams;
+    var t = sp.get('t') || sp.get('token') || sp.get('code') || sp.get('k');
+    var email = sp.get('email') || '';
+    var msg = document.getElementById('msg'), ok = document.getElementById('ok');
+    function showInvalid(){ ok.style.display='none'; msg.style.display='block'; msg.textContent='Link non valido o scaduto.'; }
+    function showValid(){ msg.style.display='none'; ok.style.display='block'; }
+    if(!ENDPOINT || !t){ showInvalid(); return; }
+
+    // 1) validate
+    jsonp(ENDPOINT+'?action=validate&t='+encodeURIComponent(t), function(v){
+      if(!(v&&v.ok)){ showInvalid(); return; }
+      if(!email && v.email){ email = v.email || ''; }
+      showValid();
+
+      // 2) consume + redirect
+      document.getElementById('go').onclick=function(){
+        jsonp(ENDPOINT+'?action=consume&t='+encodeURIComponent(t), function(c){
+          if(!(c&&c.ok)){ showInvalid(); return; }
+          try { sessionStorage.setItem('gs_reset_consumed','1'); } catch(e){}
+          var SCOPE = getScope();
+          var appUrl = location.origin + SCOPE + '?resetToken=' +
+                       encodeURIComponent(t) + '&email=' + encodeURIComponent(email || '');
+          location.replace(appUrl);
+        });
+      };
+    });
+  })();
+  </script>
+</body></html>

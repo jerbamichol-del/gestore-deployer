@@ -1,0 +1,8 @@
+{
+  "name": "Copy of gestore-spese 3",
+  "description": "Una semplice applicazione per tracciare le spese, ricreata da zero per garantire pulizia e funzionalità.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}

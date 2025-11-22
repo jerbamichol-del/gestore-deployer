@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ricezione spesa...</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: sans-serif;
+            background-color: #f1f5f9;
+            color: #475569;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+    <p>Elaborazione in corso, verrai reindirizzato...</p>
+    <script>
+        // Se il service worker non riesce a reindirizzare per qualche motivo,
+        // questo lo farà come fallback.
+        window.location.href = '/';
+    </script>
+</body>
+</html>
